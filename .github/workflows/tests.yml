@@ -19,11 +19,17 @@ jobs:
           python-version: "3.12"
       - name: Unit tests
         run: python -m unittest discover -s tests -v
-      - name: Phone scripts keep Unix line endings
+      # Read as bytes: grep on Windows drops the CR before matching and cannot see line endings.
+      - name: Line endings as checked out (phone scripts Unix, Windows launcher Windows)
         shell: bash
         run: |
-          if grep -l $'\r' aw/phone/*.sh Stakeout.command; then exit 1; fi
-      - name: Windows launcher has Windows line endings
-        if: runner.os == 'Windows'
-        shell: bash
-        run: grep -q $'\r$' Stakeout.bat
+          python - <<'EOF'
+          from pathlib import Path
+          unix = sorted(Path("aw/phone").glob("*.sh")) + [Path("Stakeout.command")]
+          bad = [str(p) for p in unix if b"\r" in p.read_bytes()]
+          bat = Path("Stakeout.bat").read_bytes()
+          if bat.count(b"\n") != bat.count(b"\r\n"):
+              bad.append("Stakeout.bat")
+          print(f"{len(unix)} Unix files checked, Stakeout.bat: {bat.count(b'\r\n')} CRLF lines")
+          raise SystemExit(f"wrong line endings: {bad}" if bad else 0)
+          EOF
