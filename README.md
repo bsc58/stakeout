@@ -20,10 +20,10 @@ Stakeout 回答一个问题：**手机上的应用都在做什么？**
 ## 需要什么
 
 - 一台已 root 的安卓手机，开启 USB 调试并用数据线连接电脑。在手机的 root 管理器里要允许 Shell（com.android.shell）使用超级用户：电脑上运行 `adb shell su -c id`，输出里有 `uid=0` 就可以。用 KernelSU 测试过；Magisk、APatch 这类同样提供 `su` 的方案按原理可用，没有实测。
-- 电脑上有 Python 3.12，不需要安装任何第三方包。
-- adb。查找顺序：环境变量 `AW_ADB`，项目旁边的 `../adb-tools/platform-tools/adb`，`PATH`。
+- 一台 Mac 或 Windows 电脑，装有 Python 3.12，不需要安装任何第三方包。Windows 上从 https://www.python.org 安装（不要用应用商店版）。Mac 版在真机上测过；Windows 版还没有连着手机测过，见下面“在 Windows 上”。
+- adb。查找顺序：环境变量 `AW_ADB`，项目旁边的 `../adb-tools/platform-tools/adb`（Windows 上是 `adb.exe`），`PATH`。
 - 只有解密 HTTPS 内容时才需要（见下面“解密 HTTPS 内容”）：
-  - 电脑上的 Wireshark（用的是其中的 `tshark`，用 4.6.10 测试过）。查找顺序：环境变量 `AW_TSHARK`，项目旁边的 `../wireshark-tools/Wireshark.app/Contents/MacOS/tshark`，`/Applications/Wireshark.app/Contents/MacOS/tshark`，`PATH` 里的 `tshark`。Stakeout 不安装它，请从 https://www.wireshark.org 下载。
+  - 电脑上的 Wireshark（用的是其中的 `tshark`，用 4.6.10 测试过）。查找顺序：环境变量 `AW_TSHARK`；Mac 上是项目旁边的 `../wireshark-tools/Wireshark.app/Contents/MacOS/tshark`、`/Applications/Wireshark.app/Contents/MacOS/tshark`，Windows 上是项目旁边的 `../wireshark-tools/Wireshark/tshark.exe`、`C:\Program Files\Wireshark\tshark.exe`；最后是 `PATH` 里的 `tshark`。Stakeout 不安装它，请从 https://www.wireshark.org 下载。
   - 手机用的 eCapture v2.11.0 android-arm64 程序，放在电脑上。查找顺序：环境变量 `AW_ECAPTURE`，项目旁边的 `../ecapture-tools/ecapture`。采集时 Stakeout 把它推到手机上运行，结束后删掉。
 
 ## 先用网页
@@ -35,6 +35,8 @@ python3 stakeout.py ui
 ```
 
 图标存在文件的附加属性里，源图是 `icon.png`；用不保留附加属性的方式复制这个文件，图标会丢，文件本身照常能用。
+
+Windows 上双击 `Stakeout.bat`，做的是同一件事；命令行里把 `python3` 换成 `py`。
 
 终端里会给出一个网址（`http://127.0.0.1:8765/?token=…`）并打开浏览器。网页只有这台电脑能打开，网址里的 token 是这次启动时生成的；关掉浏览器不会停止，在终端按 Ctrl+C 退出（正在进行的观察会先正常结束并整理好结果）。`--port` 换端口，`--no-open` 不自动打开浏览器。
 
@@ -66,6 +68,16 @@ python3 stakeout.py ui [--port 8765] [--no-open]                   # 网页
 如果采集时电脑和手机断开了（拔了数据线、电脑休眠、关了终端），手机上的采集会在设定的最长时间（按回车结束时为 60 分钟，用 `--seconds` 时为设定秒数再加 5 分钟）到达，或手机存储空间少于 1 GB 时自行停止，数据留在手机上。重新连接后运行 `fetch` 取回数据并分析。手机上还有这样一次采集时，`run` 和网页都不会开始新的采集，而是提示先运行 `fetch`。
 
 `run` 的其他选项：`--out` 指定运行目录（默认 `./runs/<包名>-<时间>/`，整部手机是 `./runs/phone-<时间>/`；必须是新目录、空目录或以前的运行目录），`--no-net` 不抓包，`--no-filetrace` 不跟踪文件，`--serial` 在连了多台设备时指定一台。`run`、`fetch`、`analyze` 都可以加 `--show-secrets`，只影响详细报告，见下面“详细报告隐藏哪些值”。在项目目录里运行命令行时，结果也会出现在网页的“以前的观察”里。
+
+## 在 Windows 上
+
+1. 装 Python 3.12（https://www.python.org ，安装时勾上 “Add python.exe to PATH”）。
+2. 下载 Android platform-tools 的 Windows 版，把解开的 `platform-tools` 文件夹放进项目旁边的 `adb-tools` 文件夹里（得到 `adb-tools\platform-tools\adb.exe`），或者加进 `PATH`。手机第一次连 Windows 电脑时，可能要装手机厂商的 USB 驱动，`adb devices` 才能看到手机。
+3. 下载 Stakeout：用 `git clone`，或者在 GitHub 上下载 ZIP 再解开。推到手机上运行的脚本必须保持 Unix 的换行方式，仓库里已经设好，不要用会改换行的编辑器去改 `aw\phone\` 里的文件。
+4. 要解密的话，装 Wireshark 的 Windows 版（默认装到 `C:\Program Files\Wireshark`），eCapture 用的是和 Mac 上同一个手机程序，放到项目旁边的 `ecapture-tools\ecapture`。
+5. 双击 `Stakeout.bat`。
+
+Windows 版和 Mac 版是同一份代码，单元测试在 Windows 的编码设置下跑过，但还没有在 Windows 电脑上连着手机做过一次观察。
 
 ## 整部手机的观察：看得到什么，看不到什么
 
