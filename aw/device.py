@@ -1,6 +1,7 @@
 """Phone access over adb. Everything Stakeout does on the phone goes through Device.
 
-Root is KernelSU, reached as `adb shell su -c '<command>'`. Commands passed to
+Root is reached as `adb shell su -c '<command>'`: any root that gives the shell a `su` (tested with
+KernelSU only). Commands passed to
 sh() are plain words (paths, package names, numbers); anything that would need
 quoting belongs in a pushed script (aw/phone/).
 """
@@ -27,7 +28,8 @@ _SAFE_REMOTE_PATH = re.compile(r"/[A-Za-z0-9_./-]+")
 
 NO_DEVICE = "没有检测到手机。请用数据线连接手机，并在开发者选项中打开 USB 调试。"
 UNAUTHORIZED = "手机还没有允许这台电脑调试。请解锁手机，在“允许 USB 调试吗？”对话框中点允许，然后重试。"
-NO_ROOT = "无法获得 root 权限。请在 KernelSU 管理器中允许 Shell（com.android.shell）使用超级用户，然后重试。"
+NO_ROOT = ("无法获得 root 权限。请在手机的 root 管理器（KernelSU、Magisk 等）里允许 Shell（com.android.shell）"
+           "使用超级用户，然后重试。")
 # What the adb client prints when it cannot reach the phone (cable pulled, phone rebooting).
 _LOST = re.compile(r"^(?:adb: )?(?:error: )?(?:no devices/emulators found|device offline|device unauthorized"
                    r"|device '[^']*' not found|device not found|closed|protocol fault|connect failed)", re.M)

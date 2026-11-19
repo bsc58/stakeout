@@ -19,7 +19,7 @@ Stakeout 回答一个问题：**手机上的应用都在做什么？**
 
 ## 需要什么
 
-- 一台已 root（KernelSU）的安卓手机，开启 USB 调试并用数据线连接电脑。KernelSU 里要允许 Shell（com.android.shell）使用超级用户。
+- 一台已 root 的安卓手机，开启 USB 调试并用数据线连接电脑。在手机的 root 管理器里要允许 Shell（com.android.shell）使用超级用户：电脑上运行 `adb shell su -c id`，输出里有 `uid=0` 就可以。用 KernelSU 测试过；Magisk、APatch 这类同样提供 `su` 的方案按原理可用，没有实测。
 - 电脑上有 Python 3.12，不需要安装任何第三方包。
 - adb。查找顺序：环境变量 `AW_ADB`，项目旁边的 `../adb-tools/platform-tools/adb`，`PATH`。
 - 只有解密 HTTPS 内容时才需要（见下面“解密 HTTPS 内容”）：
