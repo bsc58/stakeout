@@ -1,0 +1,23 @@
+# What a capture brings home, and what is read from the phone: private, stays on this computer.
+runs/
+cache/
+fixtures/
+
+# Internal design documents and the tests that replay real captures (they name real apps, hosts and addresses).
+docs/CONTRACT*.md
+tests/test_appops.py
+tests/test_collect.py
+tests/test_filetrace.py
+tests/test_integration.py
+tests/test_keylog.py
+tests/test_labels.py
+tests/test_logcat.py
+tests/test_net.py
+tests/test_phone_integration.py
+tests/test_poll.py
+tests/test_report.py
+tests/test_tls.py
+
+__pycache__/
+*.pyc
+.DS_Store

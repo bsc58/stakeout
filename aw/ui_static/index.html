@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<meta name="referrer" content="no-referrer">
+<title>Stakeout</title>
+<link rel="stylesheet" href="/style.css">
+<script src="/app.js" defer></script>
+</head>
+<body>
+<header class="top">
+  <div class="wrap">
+    <div class="brand">
+      <span class="name">Stakeout</span>
+      <span class="tagline">看看手机上的应用都在做什么</span>
+    </div>
+    <p class="phone" id="phone" data-state="wait">
+      <span class="dot" aria-hidden="true"></span>
+      <span><strong id="phone-name"></strong><span id="phone-text">正在查看手机……</span></span>
+    </p>
+  </div>
+</header>
+
+<main class="wrap">
+  <p class="notice" id="notice" role="alert" hidden></p>
+
+  <section class="card" id="start-card" aria-labelledby="start-title">
+    <h2 id="start-title">开始观察</h2>
+    <p class="last" id="last-message" hidden></p>
+    <form id="start-form" novalidate>
+      <fieldset class="field">
+        <legend>看什么</legend>
+        <div class="segmented">
+          <label><input type="radio" name="scope" value="phone" checked><span>观察整部手机</span></label>
+          <label><input type="radio" name="scope" value="app"><span>只看一个应用</span></label>
+        </div>
+        <div class="picker" id="app-picker" hidden>
+          <input type="search" id="app-filter" placeholder="搜索应用名称或包名" autocomplete="off" aria-label="搜索应用">
+          <select id="app-select" size="8" aria-label="选择一个应用"></select>
+          <p class="hint" id="app-hint"></p>
+        </div>
+      </fieldset>
+
+      <fieldset class="field">
+        <legend>看多久</legend>
+        <div class="segmented">
+          <label><input type="radio" name="seconds" value="120"><span>2 分钟</span></label>
+          <label><input type="radio" name="seconds" value="300" checked><span>5 分钟</span></label>
+          <label><input type="radio" name="seconds" value="600"><span>10 分钟</span></label>
+          <label><input type="radio" name="seconds" value=""><span>直到我停止</span></label>
+        </div>
+      </fieldset>
+
+      <div class="field">
+        <label class="switch">
+          <input type="checkbox" id="decrypt">
+          <span class="track" aria-hidden="true"></span>
+          <span class="switch-text">解密网络内容</span>
+        </label>
+        <p class="hint">打开后，能看到应用发出去的网络请求里带了哪些信息（页面上只列出信息的种类和次数，具体内容在可以下载的文件里）。看不到的：观察开始前就已经建立的连接，以及应用用自己的加密方式发出的内容。</p>
+        <p class="hint warn" id="decrypt-missing" hidden></p>
+      </div>
+
+      <p class="form-msg" id="form-msg" role="alert" hidden></p>
+      <div class="actions">
+        <button type="submit" class="primary" id="start-btn" disabled>开始观察</button>
+        <span class="hint" id="start-why"></span>
+      </div>
+    </form>
+  </section>
+
+  <section class="card running" id="run-card" aria-live="polite" hidden>
+    <p class="stage" id="run-stage"></p>
+    <div class="clock">
+      <span class="elapsed" id="elapsed">0:00</span>
+      <span class="planned" id="planned"></span>
+    </div>
+    <div class="progress" id="progress" hidden><div class="progress-bar" id="progress-bar"></div></div>
+    <p class="advice" id="run-advice"></p>
+    <p class="hint" id="run-message"></p>
+    <div class="actions">
+      <button type="button" class="stop" id="stop-btn">现在停止</button>
+    </div>
+  </section>
+
+  <section class="result" id="result" aria-live="polite" hidden></section>
+
+  <section class="history" aria-labelledby="history-title">
+    <h2 id="history-title">以前的观察</h2>
+    <div id="runs"><p class="empty">正在读取……</p></div>
+  </section>
+</main>
+
+<footer class="wrap foot">
+  Stakeout 只在这台电脑上运行。页面上只显示应用名称、次数、时间、服务器名称这类概况，不显示抓到的具体内容；具体内容只在标着“私密”的下载文件里。
+</footer>
+</body>
+</html>
