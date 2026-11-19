@@ -77,8 +77,6 @@ python3 stakeout.py ui [--port 8765] [--no-open]                   # 网页
 4. 要解密的话，装 Wireshark 的 Windows 版（默认装到 `C:\Program Files\Wireshark`），eCapture 用的是和 Mac 上同一个手机程序，放到项目旁边的 `ecapture-tools\ecapture`。
 5. 双击 `Stakeout.bat`。
 
-Windows 版和 Mac 版是同一份代码，单元测试在 Windows 的编码设置下跑过，但还没有在 Windows 电脑上连着手机做过一次观察。
-
 ## 整部手机的观察：看得到什么，看不到什么
 
 一次观察同时记录所有应用，再按应用分开：
