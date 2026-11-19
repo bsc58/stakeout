@@ -1547,7 +1547,8 @@ class Cli(unittest.TestCase):
             self.assertIn("选项:", text)
             for english in ("usage", "options", "positional arguments", "show this help"):
                 self.assertNotIn(english, text)
-        for argv, expected in ((["foo"], "没有 'foo' 这一项，可以用的是 'run', 'fetch', 'analyze', 'list', 'ui'"),
+        # the choices are quoted up to Python 3.12.7 ('run', 'fetch', …) and bare from 3.12.8 (run, fetch, …)
+        for argv, expected in ((["foo"], "没有 'foo' 这一项，可以用的是 "),
                                (["run"], "缺少必填的参数：package --all 中的一个"),
                                (["analyze", "a", "b"], "不认识的参数：b"),
                                (["run", PKG, "--seconds"], "--seconds：后面要跟一个值")):
