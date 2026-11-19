@@ -33,3 +33,43 @@ jobs:
           print(f"{len(unix)} Unix files checked, Stakeout.bat: {bat.count(b'\r\n')} CRLF lines")
           raise SystemExit(f"wrong line endings: {bad}" if bad else 0)
           EOF
+
+  # Stakeout.exe, the Windows launcher with the icon: built with the C# compiler that comes with Windows,
+  # then started for real (the page must answer), and kept as a download of the run.
+  launcher:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build Stakeout.exe
+        shell: powershell
+        run: |
+          $csc = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
+          & $csc /nologo /target:exe /optimize+ /win32icon:launcher\icon.ico /out:Stakeout.exe launcher\Stakeout.cs
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          (Get-Item Stakeout.exe).VersionInfo | Format-List ProductName, FileVersion
+      - name: Stakeout.exe has the icon and opens the page
+        shell: powershell
+        run: |
+          Add-Type -AssemblyName System.Drawing
+          [System.Drawing.Icon]::ExtractAssociatedIcon("$PWD\Stakeout.exe").ToBitmap().Save("$PWD\exe-icon.png")
+          Write-Output ("py launcher on this machine: " + [bool](Get-Command py -ErrorAction SilentlyContinue))
+          $p = Start-Process -FilePath .\Stakeout.exe -ArgumentList '--no-open', '--port', '8799' -PassThru `
+               -RedirectStandardOutput out.txt -RedirectStandardError err.txt
+          $ok = $false
+          for ($i = 0; $i -lt 60 -and -not $ok; $i++) {
+            Start-Sleep -Milliseconds 500
+            try { $ok = (Invoke-WebRequest -UseBasicParsing http://127.0.0.1:8799/).StatusCode -eq 200 } catch {}
+          }
+          taskkill /T /F /PID $p.Id | Out-Null
+          Get-Content out.txt, err.txt
+          if (-not $ok) { throw 'the page did not answer' }
+          if ((Get-Content out.txt -Raw) -notmatch 'http://127\.0\.0\.1:8799/\?token=') { throw 'no page address printed' }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Stakeout-exe
+          path: |
+            Stakeout.exe
+            exe-icon.png
