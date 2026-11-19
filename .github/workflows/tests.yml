@@ -1,0 +1,29 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Unit tests
+        run: python -m unittest discover -s tests -v
+      - name: Phone scripts keep Unix line endings
+        shell: bash
+        run: |
+          if grep -l $'\r' aw/phone/*.sh Stakeout.command; then exit 1; fi
+      - name: Windows launcher has Windows line endings
+        if: runner.os == 'Windows'
+        shell: bash
+        run: grep -q $'\r$' Stakeout.bat
