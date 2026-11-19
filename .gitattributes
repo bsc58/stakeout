@@ -1,0 +1,6 @@
+# The scripts run on the phone (and the macOS launcher) break with Windows line endings: keep them Unix,
+# also in a checkout on Windows. The Windows launcher wants Windows line endings.
+*.sh        text eol=lf
+*.command   text eol=lf
+*.bat       text eol=crlf
+*.png       binary

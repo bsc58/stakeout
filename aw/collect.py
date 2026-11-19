@@ -35,7 +35,7 @@ CLEAN_TIMEOUT = 60
 # on when the computer goes away: --seconds N plus a margin for stopping, or the cap without it.
 MAX_CAPTURE_S = 3600
 STOP_MARGIN_S = 300
-FETCH_CMD = "python3 stakeout.py fetch"
+FETCH_CMD = ("py" if device.WINDOWS else "python3") + " stakeout.py fetch"
 # aw_ctl.sh `WARN unavailable <code>`: what the phone lacks, said when the capture starts.
 UNAVAILABLE_ZH = {
     "tcpdump": "手机上没有 tcpdump 程序，本次不抓包。",

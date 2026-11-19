@@ -18,11 +18,18 @@ import threading
 import time
 from pathlib import Path
 
+WINDOWS = os.name == "nt"
 PROJECT_DIR = Path(__file__).resolve().parent.parent
-BUNDLED_ADB = PROJECT_DIR.parent / "adb-tools" / "platform-tools" / "adb"
-BUNDLED_ECAPTURE = PROJECT_DIR.parent / "ecapture-tools" / "ecapture"
-BUNDLED_TSHARK = PROJECT_DIR.parent / "wireshark-tools" / "Wireshark.app" / "Contents" / "MacOS" / "tshark"
-SYSTEM_TSHARK = Path("/Applications/Wireshark.app/Contents/MacOS/tshark")
+BUNDLED_ADB = PROJECT_DIR.parent / "adb-tools" / "platform-tools" / ("adb.exe" if WINDOWS else "adb")
+BUNDLED_ECAPTURE = PROJECT_DIR.parent / "ecapture-tools" / "ecapture"     # runs on the phone: the same file
+if WINDOWS:
+    BUNDLED_TSHARK = PROJECT_DIR.parent / "wireshark-tools" / "Wireshark" / "tshark.exe"
+    SYSTEM_TSHARK = Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "Wireshark" / "tshark.exe"
+else:
+    BUNDLED_TSHARK = PROJECT_DIR.parent / "wireshark-tools" / "Wireshark.app" / "Contents" / "MacOS" / "tshark"
+    SYSTEM_TSHARK = Path("/Applications/Wireshark.app/Contents/MacOS/tshark")
+# adb runs apart from the terminal's Ctrl+C: its own session (macOS, Linux) or process group (Windows).
+_OWN_GROUP = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if WINDOWS else {"start_new_session": True}
 
 _SAFE_REMOTE_PATH = re.compile(r"/[A-Za-z0-9_./-]+")
 
@@ -61,7 +68,8 @@ def _check_lost(err):
 
 
 def find_adb(adb=None):
-    """adb lookup order: argument, $AW_ADB, <project>/../adb-tools/platform-tools/adb, PATH."""
+    """adb lookup order: argument, $AW_ADB, <project>/../adb-tools/platform-tools/adb (adb.exe on Windows),
+    PATH."""
     if adb:
         found = shutil.which(adb)
         if not found:
@@ -90,9 +98,10 @@ def find_ecapture(path=None) -> str | None:
 
 
 def find_tshark(path=None) -> str | None:
-    """Wireshark's tshark on this computer. Lookup order: argument, $AW_TSHARK,
-    <project>/../wireshark-tools/Wireshark.app/Contents/MacOS/tshark,
-    /Applications/Wireshark.app/Contents/MacOS/tshark, PATH. None when the first of these that is
+    """Wireshark's tshark on this computer. Lookup order: argument, $AW_TSHARK, BUNDLED_TSHARK, SYSTEM_TSHARK
+    (macOS: <project>/../wireshark-tools/Wireshark.app/Contents/MacOS/tshark, then
+    /Applications/Wireshark.app/Contents/MacOS/tshark; Windows: <project>/../wireshark-tools/Wireshark/tshark.exe,
+    then %ProgramFiles%\\Wireshark\\tshark.exe), PATH. None when the first of these that is
     set is not an executable (a wrong explicit setting does not fall through, as with adb)."""
     explicit = path or os.environ.get("AW_TSHARK")
     if explicit:
@@ -151,9 +160,9 @@ class Device:
     def _adb(self, args, timeout):
         """Run adb; return (stdout, stderr, returncode)."""
         try:
-            # Own session: Ctrl+C in the terminal does not kill adb mid-command.
+            # Apart from the terminal: Ctrl+C there does not kill adb mid-command.
             proc = subprocess.Popen(self._base() + args, stdout=subprocess.PIPE,
-                                    stderr=subprocess.PIPE, start_new_session=True)
+                                    stderr=subprocess.PIPE, **_OWN_GROUP)
         except OSError as e:
             raise DeviceError(f"无法运行 adb（{self.adb}）：{e}") from e
         deadline = time.monotonic() + timeout
@@ -206,9 +215,9 @@ class Device:
         local_dir.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryFile() as errf:
             try:
-                # Own session, as in _adb: Ctrl+C in the terminal must not cut the pull short.
+                # Apart from the terminal, as in _adb: Ctrl+C there must not cut the pull short.
                 proc = subprocess.Popen(self._base() + ["exec-out", _as_root(cmd) if root else cmd],
-                                        stdout=subprocess.PIPE, stderr=errf, start_new_session=True)
+                                        stdout=subprocess.PIPE, stderr=errf, **_OWN_GROUP)
             except OSError as e:
                 raise DeviceError(f"无法运行 adb（{self.adb}）：{e}") from e
             stream = _Watched(proc.stdout)
