@@ -14,8 +14,8 @@ using System.Text;
 [assembly: AssemblyTitle("Stakeout")]
 [assembly: AssemblyProduct("Stakeout")]
 [assembly: AssemblyDescription("Stakeout: see what the apps on a rooted Android phone are doing")]
-[assembly: AssemblyVersion("0.1.0.0")]
-[assembly: AssemblyFileVersion("0.1.0.0")]
+[assembly: AssemblyVersion("0.2.0.0")]
+[assembly: AssemblyFileVersion("0.2.0.0")]
 
 static class Launcher
 {
