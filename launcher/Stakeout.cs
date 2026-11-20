@@ -21,7 +21,21 @@ static class Launcher
 {
     static int Main(string[] args)
     {
+        // The messages below are Chinese: UTF-8 while the launcher runs, the console's own setting back after.
+        Encoding before = Console.OutputEncoding;
         Console.OutputEncoding = Encoding.UTF8;
+        try
+        {
+            return Run(args);
+        }
+        finally
+        {
+            Console.OutputEncoding = before;
+        }
+    }
+
+    static int Run(string[] args)
+    {
         // Ctrl+C is for Stakeout, which finishes a running observation before it quits: the launcher waits.
         Console.CancelKeyPress += delegate(object sender, ConsoleCancelEventArgs e) { e.Cancel = true; };
 

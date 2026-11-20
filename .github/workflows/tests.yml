@@ -64,9 +64,14 @@ jobs:
             try { $ok = (Invoke-WebRequest -UseBasicParsing http://127.0.0.1:8799/).StatusCode -eq 200 } catch {}
           }
           taskkill /T /F /PID $p.Id | Out-Null
-          Get-Content out.txt, err.txt
+          $out = [IO.File]::ReadAllText("$PWD\out.txt", [Text.Encoding]::UTF8)
+          $err = [IO.File]::ReadAllText("$PWD\err.txt", [Text.Encoding]::UTF8)
+          [Console]::Out.WriteLine("page answered: $ok")
+          [Console]::Out.WriteLine("stdout: " + ($out -replace 'token=[\w-]+', 'token=...'))
+          [Console]::Out.WriteLine("stderr: " + $err)
           if (-not $ok) { throw 'the page did not answer' }
-          if ((Get-Content out.txt -Raw) -notmatch 'http://127\.0\.0\.1:8799/\?token=') { throw 'no page address printed' }
+          if ($out -notmatch 'http://127\.0\.0\.1:8799/\?token=') { throw 'no page address printed' }
+          [Console]::Out.WriteLine('Stakeout.exe started Stakeout and the page answered')
       - uses: actions/upload-artifact@v4
         with:
           name: Stakeout-exe
