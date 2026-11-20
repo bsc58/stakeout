@@ -36,7 +36,7 @@ python3 stakeout.py ui
 
 图标存在文件的附加属性里，源图是 `icon.png`；用不保留附加属性的方式复制这个文件，图标会丢，文件本身照常能用。
 
-Windows 上双击 `Stakeout.bat`，做的是同一件事；命令行里把 `python3` 换成 `py`。
+Windows 上双击 `Stakeout.exe`（也是像素侦探图标，在发布版的压缩包里）或 `Stakeout.bat`，做的是同一件事；命令行里把 `python3` 换成 `py`。
 
 终端里会给出一个网址（`http://127.0.0.1:8765/?token=…`）并打开浏览器。网页只有这台电脑能打开，网址里的 token 是这次启动时生成的；关掉浏览器不会停止，在终端按 Ctrl+C 退出（正在进行的观察会先正常结束并整理好结果）。`--port` 换端口，`--no-open` 不自动打开浏览器。
 
@@ -73,9 +73,9 @@ python3 stakeout.py ui [--port 8765] [--no-open]                   # 网页
 
 1. 装 Python 3.12（https://www.python.org ，安装时勾上 “Add python.exe to PATH”）。
 2. 下载 Android platform-tools 的 Windows 版，把解开的 `platform-tools` 文件夹放进项目旁边的 `adb-tools` 文件夹里（得到 `adb-tools\platform-tools\adb.exe`），或者加进 `PATH`。手机第一次连 Windows 电脑时，可能要装手机厂商的 USB 驱动，`adb devices` 才能看到手机。
-3. 下载 Stakeout：用 `git clone`，或者在 GitHub 上下载 ZIP 再解开。推到手机上运行的脚本必须保持 Unix 的换行方式，仓库里已经设好，不要用会改换行的编辑器去改 `aw\phone\` 里的文件。
+3. 下载 Stakeout：在 Releases 里下载 Windows 版的压缩包再解开（也可以用 `git clone`）。推到手机上运行的脚本必须保持 Unix 的换行方式，仓库里已经设好，不要用会改换行的编辑器去改 `aw\phone\` 里的文件。
 4. 要解密的话，装 Wireshark 的 Windows 版（默认装到 `C:\Program Files\Wireshark`），eCapture 用的是和 Mac 上同一个手机程序，放到项目旁边的 `ecapture-tools\ecapture`。
-5. 双击 `Stakeout.bat`。
+5. 双击 `Stakeout.exe`（压缩包里有，图标是像素侦探）。它没有数字签名，第一次打开时 Windows 会提示“Windows 已保护你的电脑”：点“更多信息”，再点“仍要运行”。它只是用 Python 启动 Stakeout，源代码在 `launcher\Stakeout.cs`。用 `git clone` 得到的代码里没有这个程序，双击 `Stakeout.bat`，效果一样。
 
 ## 整部手机的观察：看得到什么，看不到什么
 
