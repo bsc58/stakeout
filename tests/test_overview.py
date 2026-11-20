@@ -267,6 +267,102 @@ class BuildApp(unittest.TestCase):
                                "score": 0, "bars": [], "sections": [], "downloads": []})
 
 
+def clear_request(host="ads.example.com", query=(), front=True, time="2026-11-19 10:00:02.000"):
+    return dict(request(host=host, query=query, front=front, time=time), source="cleartext", scheme="http",
+                protocol="http/1.1", server="198.51.100.9:80")
+
+
+class Cleartext(unittest.TestCase):
+    def test_sent_data_counts_cleartext(self):
+        reqs = [request(headers=[["accept", "*/*"]]),
+                clear_request(query=[["imei", "861234567890123"]], front=False),
+                clear_request(host="198.51.100.9", query=[["lat", "45.5017"]])]
+        app = overview.build_app(facts(requests=reqs))
+        b = bar(app, "sent_data")
+        self.assertEqual((b["count"], b["background"], b["cleartext"]), (3, 1, 2))
+        self.assertTrue(all(x["cleartext"] == 0 for x in app["bars"] if x["key"] != "sent_data"))
+        s = section(app, "sent_data")
+        self.assertTrue(s["summary"].startswith("看到它发出了 3 个请求（1 个是解密后看到的，2 个没加密，用的是明文 HTTP），"
+                                                "发往 3 个服务器"), s["summary"])
+        self.assertIn("同一个网络里的其他人", s["summary"])
+        self.assertEqual(s["columns"], ["服务器", "请求数", "其中没加密", "你没打开它时", "带了哪些信息"])
+        # an address as the Host is not shown: that server has no name on the page
+        self.assertEqual(s["rows"], [["（不知道域名）", 1, 1, 0, "位置"], ["ads.example.com", 1, 1, 1, "设备标识"],
+                                     ["api.example.com", 1, 0, 0, "—"]])
+        page = json.dumps(app, ensure_ascii=False)
+        for value in ("198.51.100.9", "861234567890123", "45.5017"):
+            self.assertNotIn(value, page)
+
+    def test_only_cleartext(self):
+        app = overview.build_app(facts(requests=[clear_request()]))
+        s = section(app, "sent_data")
+        self.assertTrue(s["summary"].startswith("看到它没加密就发出了 1 个请求（明文 HTTP），发往 1 个服务器"), s["summary"])
+        decrypted = overview.build_app(facts(requests=[request()]))
+        self.assertEqual(section(decrypted, "sent_data")["columns"], ["服务器", "请求数", "你没打开它时", "带了哪些信息"])
+        self.assertNotIn("同一个网络", section(decrypted, "sent_data")["summary"])
+
+    def test_summary(self):
+        a = dict(facts(requests=[request(), clear_request(query=[["imei", "1"]], front=False),
+                                 clear_request(), clear_request(host="198.51.100.9")]), package="com.a", label="甲")
+        b = dict(facts(requests=[request()]), package="com.b")
+        c = dict(facts(requests=[clear_request(host="img.example.com")]), package="com.c", label=None)
+        summary = overview.cleartext_summary([a, b, c], unattributed=[clear_request(host="x.example"),
+                                                                      clear_request(host="198.51.100.1")], system=2)
+        self.assertEqual(summary, {
+            "checked": True, "note": None, "requests": 4,
+            "apps": [{"package": "com.a", "label": "甲", "requests": 3, "background": 1,
+                      "hosts": [["ads.example.com", 2], [None, 1]], "kinds": ["设备标识"]},
+                     {"package": "com.c", "label": None, "requests": 1, "background": 0,
+                      "hosts": [["img.example.com", 1]], "kinds": []}],
+            "unattributed": {"requests": 2, "hosts": [["x.example", 1], [None, 1]]}, "system": 2})
+        self.assertEqual(overview.cleartext_summary([b], checked=False, note="找不到 tshark。")["checked"], False)
+
+    def test_lines(self):
+        ov = {"apps": [{"package": "com.a", "label": "甲"}],
+              "cleartext": overview.cleartext_summary(
+                  [dict(facts(requests=[clear_request(query=[["imei", "1"]], front=False), clear_request()]),
+                        package="com.a"),
+                   dict(facts(requests=[clear_request(host="img.example.com")]), package="com.c")],
+                  unattributed=[clear_request(host="x.example")])}
+        lines = overview.cleartext_lines(ov, names={"com.c": "丙", "com.a": "不用"})
+        self.assertEqual(lines, [
+            "没加密的请求（明文 HTTP）：2 个应用没加密就发出了请求，同一网络里的其他人和运营商都能看到内容。",
+            "  甲（com.a）：2 次，其中 1 次在你没打开它的时候；发往 ads.example.com（2 次）；带了设备标识类的字段。",
+            "  丙（com.c）：1 次；发往 img.example.com（1 次）；按字段名看没带设备、账号、位置这类信息。",
+            "  另有 1 个没加密的请求不知道是哪个应用发的（可能是连接太短，没对上应用），发往 x.example（1 次）。"])
+        self.assertEqual(overview.cleartext_lines({"cleartext": overview.cleartext_summary([])}),
+                         ["没加密的请求（明文 HTTP）：这次没有看到哪个应用没加密就发请求。"])
+        self.assertEqual(overview.cleartext_lines({"cleartext": overview.cleartext_summary([], False, "找不到 tshark。")}),
+                         ["没加密的请求（明文 HTTP）：这次看不出来。找不到 tshark。"])
+        self.assertEqual(overview.cleartext_lines({"apps": []}), [])
+
+    def test_lines_without_control_characters(self):
+        # a Host and a label are the app's own text: what would drive the terminal is left out
+        ov = {"cleartext": overview.cleartext_summary(
+            [dict(facts(requests=[clear_request(host="a\x1b[31m\x07b.example\r\n")]), package="com.a")])}
+        self.assertEqual(overview.cleartext_lines(ov, names={"com.a": "甲\x1b]0;x\x07\x9b2J"})[1],
+                         "  甲]0;x2J（com.a）：1 次；发往 a[31mb.example（1 次）；按字段名看没带设备、账号、位置这类信息。")
+
+    def test_addresses_are_not_names(self):
+        for host in ("1.2.3.4", "1.2.3.4:8080", "1.2.3.4:", "::1", "[::1]:8080", "fe80::1%wlan0",
+                     "[fe80::1%25wlan0]:8080", "[::ffff:1.2.3.4]:80"):
+            self.assertIsNone(overview._request_host(host), host)
+        for host in ("a.example.com", "a.example.com:8080", "localhost"):
+            self.assertEqual(overview._request_host(host), host)
+
+    def test_rows_keep_distinct_servers(self):
+        # two servers shown alike (an identifier label is replaced) are still two rows, as the summary counts them
+        a, b = "a1b2c3d4e5f6a7b8c9d0a1b2c3d4e5f6a7.cdn.example.com", "f9e8d7c6b5a4f9e8d7c6b5a4f9e8d7c6b5.cdn.example.com"
+        s = section(overview.build_app(facts(requests=[request(host=a), request(host=b)])), "sent_data")
+        self.assertEqual(s["rows"], [["〈编号〉.cdn.example.com", 1, 0, "—"], ["〈编号〉.cdn.example.com", 1, 0, "—"]])
+        self.assertIn("发往 2 个服务器", s["summary"])
+
+    def test_har_scheme(self):
+        entry, = overview.har([clear_request(query=[["a", "1"]])])["log"]["entries"]
+        self.assertEqual(entry["request"]["url"], "http://ads.example.com/v1/x?a=1")
+        self.assertEqual(entry["_stakeout"]["source"], "cleartext")
+
+
 class Rank(unittest.TestCase):
     def test_order(self):
         def app(package, score, counts):

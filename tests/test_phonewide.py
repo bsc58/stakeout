@@ -52,6 +52,8 @@ class _Overview:
         self.module.build_app = self.build_app
         self.module.rank = lambda apps: sorted(apps, key=lambda a: a["package"])
         self.module.write_downloads = self.write_downloads
+        self.cleartext = None
+        self.module.cleartext_summary = self.cleartext_summary
 
     def build_app(self, facts):
         self.facts.append(facts)
@@ -59,6 +61,11 @@ class _Overview:
                 "third_party": facts["third_party"], "score": 0,
                 "bars": [{"key": "network"}],       # an app with no bar is not listed
                 "sections": [], "downloads": []}
+
+    def cleartext_summary(self, facts_list, checked=True, note=None, unattributed=(), system=0):
+        self.cleartext = {"packages": [f["package"] for f in facts_list], "checked": checked, "note": note,
+                          "unattributed": list(unattributed), "system": system}
+        return {"checked": checked}
 
     def write_downloads(self, run_dir, package, detail, exchanges):
         self.downloads.append((Path(run_dir), package, detail, exchanges))
@@ -347,6 +354,74 @@ class SyntheticRun(unittest.TestCase):
         self.assertIn("每 10 秒", text)
         for word in ("uid", "pid", "TLS", "HTTP/2", "ClientHello"):
             self.assertNotIn(word, text)
+
+
+def _clear_exchange(conn, t, host, path, query=()):
+    return {"source": "cleartext", "time": DAY + t, "protocol": "http/1.1", "method": "GET", "scheme": "http",
+            "host": host, "path": path, "query": [list(q) for q in query],
+            "request": {"headers": [["Host", host]], "body": None, "complete": True},
+            "response": {"status": 200, "headers": [], "body": None, "complete": True}, "partial": [],
+            "connection": conn, "server": "9.9.9.9:80", "pid": None, "thread": None, "connection_host_tail": None}
+
+
+CLEARTEXT = {"tshark": "TShark 4",
+             "connections": [{"id": c, "time": DAY + "10:00:01.000", "client": f"10.0.0.2:{port}", "server": "9.9.9.9:80",
+                              "began_in_capture": True, "sent": 10, "received": 10, "protocol": "http/1.1",
+                              "exchanges": 1} for c, port in ((20, 40005), (21, 41999), (22, 42000))],
+             "exchanges": [_clear_exchange(20, "10:00:03.000", "ads.example", "/a", [("imei", "1")]),
+                           _clear_exchange(20, "10:00:12.000", "ads.example", "/b"),
+                           _clear_exchange(21, "10:00:04.000", "short.example", "/c"),
+                           _clear_exchange(22, "10:00:05.000", "sys.example", "/d")],
+             "undecoded": {"bytes": 0, "reasons": {}}}
+
+
+class Cleartext(unittest.TestCase):
+    """A run without a key file: the capture's cleartext HTTP is read on its own and attributed by the poll's
+    sockets (local address 10.0.0.2:40005 is alpha's; 42000 is the system's; 41999 nobody's)."""
+
+    def analyze(self, cleartext):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        run = Path(tmp.name)
+        _make_run(run)
+        (run / "tls_keys.log").unlink(missing_ok=True)
+        poll = (run / "poll.txt").read_text(encoding="utf-8")
+        poll = poll.replace(f"=== {DAY}10:00:00\n",
+                            f"=== {DAY}10:00:00\nS tcp ESTAB 0 0 10.0.0.2:42000 9.9.9.9:80 uid:1000 ino:9 sk:9 <->\n", 1)
+        (run / "poll.txt").write_text(poll, encoding="utf-8")
+        with _standins(PACKAGES) as ov, \
+                mock.patch("aw.parse_net.parse_pcap", return_value=PCAP), \
+                mock.patch("aw.parse_keylog.parse_cleartext", side_effect=cleartext) as parse:
+            result = phonewide.analyze_phone(run)
+        return result, ov, parse
+
+    def test_attributed_like_every_connection(self):
+        result, ov, parse = self.analyze(lambda *a, **k: CLEARTEXT)
+        self.assertEqual(parse.call_count, 1)
+        alpha = next(f for f in ov.facts if f["package"] == "com.example.alpha")
+        clear = [x for x in alpha["requests"] if x["source"] == "cleartext"]
+        self.assertEqual([(x["path"], x["front"]) for x in clear], [("/a", True), ("/b", False)])
+        self.assertEqual(ov.cleartext["checked"], True)
+        self.assertIsNone(ov.cleartext["note"])
+        self.assertEqual([x["path"] for x in ov.cleartext["unattributed"]], ["/c"])
+        self.assertEqual(ov.cleartext["system"], 1)
+        self.assertEqual(result["cleartext"], {"checked": True})
+        self.assertFalse(result["run"]["decrypt"])          # nothing was decrypted
+        text = "\n".join(result["limits"])
+        self.assertIn("抓包里有 1 个没加密的请求不知道是哪个应用发的", text)
+        self.assertIn("没加密的 1 个请求", text)          # the system's
+        self.assertIn("没加密的请求（明文 HTTP）是直接从抓包里读出来的", text)
+        detail = next(d for _, pkg, d, _ in ov.downloads if pkg == "com.example.alpha")
+        self.assertEqual({r["scheme"] for r in detail["requests"]}, {"http"})
+
+    def test_without_tshark(self):
+        def missing(*a, **k):
+            from aw import parse_keylog
+            raise parse_keylog.KeylogError("找不到 tshark：请安装 Wireshark。")
+        result, ov, _ = self.analyze(missing)
+        self.assertEqual((ov.cleartext["checked"], ov.cleartext["note"]), (False, "找不到 tshark：请安装 Wireshark。"))
+        self.assertIn("没能检查哪些请求没加密（找不到 tshark：请安装 Wireshark）。", result["limits"])
+        self.assertFalse(any(x["source"] == "cleartext" for f in ov.facts for x in f["requests"]))
 
 
 class MissingSources(unittest.TestCase):

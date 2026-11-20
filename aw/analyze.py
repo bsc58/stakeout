@@ -65,7 +65,8 @@ UNAVAILABLE_ZH = {
 }
 # Decrypted traffic (docs/CONTRACT_DECRYPT.md, docs/CONTRACT_KEYLOG.md): the sources, and the reason codes
 # of an exchange's "partial" list and of the parsers' undecoded content. Unknown codes are shown raw.
-DECRYPT_SOURCE_ZH = {"ecapture": "eCapture", "keylog": "密钥解密", "har": "代理 HAR 文件"}
+DECRYPT_SOURCE_ZH = {"ecapture": "eCapture", "keylog": "密钥解密", "har": "代理 HAR 文件",
+                     "cleartext": "没加密，直接从抓包读出"}
 PARTIAL_ZH = {
     "hpack_state_unknown": "连接的开头没有记录到，部分请求头无法还原",
     "request_incomplete": "请求不完整",
@@ -340,6 +341,40 @@ def _keylog_coverage(connections, sockets, endpoints):
     # decrypted, but the bytes are not HTTP (parse_keylog: protocol None)
     cov["decrypted"]["not_http"] = sum(1 for c in groups["decrypted"] if c.get("protocol") is None)
     return cov
+
+
+def _cleartext(raw, error, sockets, first_id):
+    """result["cleartext"]: the app's cleartext HTTP requests (docs/CONTRACT_KEYLOG.md, "Cleartext"). raw:
+    parse_cleartext's result, or parse_keylog's "cleartext"; None when the capture was not read (error: why,
+    one sentence; None as well when there is no capture). The capture is the whole phone's, so a connection is
+    the app's when the poll saw its local address on the app's socket to that server, as for _keylog_coverage;
+    without the app's sockets none is. The exchanges are numbered on from first_id (after the decrypted ones)."""
+    own = {}
+    for s in sockets:
+        if s.get("proto") == "tcp":
+            own.setdefault(_addr(s["ip"], s["port"]), set()).update(s.get("locals") or ())
+    out = {"checked": raw is not None, "error": error, "attributed": bool(sockets),
+           "tshark": (raw or {}).get("tshark"), "connections": [], "exchanges": [],
+           "others": {"connections": 0, "requests": 0}}
+    if raw is None:
+        return out
+    mine = {c["id"] for c in raw.get("connections") or [] if c.get("client") in own.get(c.get("server"), ())}
+    xs = [x for x in raw.get("exchanges") or [] if x.get("connection") in mine]
+    out["connections"] = [c for c in raw.get("connections") or [] if c["id"] in mine]
+    out["exchanges"] = [{"id": i, **x} for i, x in enumerate(xs, first_id)]
+    out["others"] = {"connections": len(raw.get("connections") or []) - len(mine),
+                     "requests": len(raw.get("exchanges") or []) - len(xs)}
+    return out
+
+
+def _cleartext_limits(clear):
+    if not clear["checked"]:
+        return [f"没能检查应用有没有没加密就发出去的请求（{clear['error'].rstrip('。')}）"] if clear["error"] else []
+    if not clear["attributed"]:
+        return ["轮询没有看到应用的连接：抓包里没加密的 HTTP 请求对不上它，没有列出"]
+    return ["没加密的 HTTP 请求是直接从抓包里读出来的（全手机的抓包，按轮询看到的应用连接对上应用）："
+            "很快就断开的连接可能对不上应用，这样的请求没有列出；采集开始前就已连上的连接，只读得到从它抓到的第一个完整请求开始的部分；"
+            "不是 HTTP 的没加密内容没有列出"]
 
 
 def _decrypted(tls, har, start, end, endpoints, keylog=None, keylog_error=None, sockets=()):
@@ -723,6 +758,19 @@ def analyze(run_dir, out_dir=None, har=None) -> dict:
     elif meta.get("decrypt") == "ecapture" or (run_dir / "tls_events.log").exists():
         from aw import parse_tls
         tls = load("tls_events.log", parse_tls.parse_tls_events, utc_offset=utc_offset)
+    # Cleartext HTTP needs no key: the key route's tshark run reads it too; otherwise a run of its own.
+    clear_raw = clear_error = None
+    if keylog is not None:
+        clear_raw = keylog.get("cleartext")
+    elif (run_dir / "net.pcap").exists():      # also when parse_net cannot read it: tshark may
+        if keylog_error:
+            clear_error = keylog_error
+        else:
+            from aw import parse_keylog
+            try:
+                clear_raw = parse_keylog.parse_cleartext(run_dir / "net.pcap", utc_offset=utc_offset)
+            except parse_keylog.KeylogError as e:
+                clear_error = str(e)
     har_result, har_error = None, None
     if har is not None:
         from aw import parse_har
@@ -737,13 +785,14 @@ def analyze(run_dir, out_dir=None, har=None) -> dict:
         except ValueError as e:
             har_error = str(e)
     decrypted = _decrypted(tls, har_result, start, end, endpoints, keylog, keylog_error, sockets)
+    cleartext = _cleartext(clear_raw, clear_error, sockets, len(decrypted["exchanges"]) + 1)
 
     dump_entries = parse_appops.diff_appops(before, after, start, end) if after is not None else []
     used, occurrences = _permissions(dump_entries, (poll or {}).get("ops") or {}, front)
     clipboard = _clipboard((logcat or {}).get("clipboard", []), occurrences, front)
     processes, new_not_top = _processes(pkg, poll, logcat, app_starts, ps_rows, app_user, names, pid_time, front)
     timeline, events_not_top = _timeline(pkg, uid, poll, logcat, processes, occurrences, clipboard, files,
-                                         network, decrypted["exchanges"], front)
+                                         network, decrypted["exchanges"] + cleartext["exchanges"], front)
 
     seconds_top, seconds_not_top, ticks_not_top = front.totals(_dt(end))
     background = {"seconds_top": seconds_top, "seconds_not_top": seconds_not_top,
@@ -762,7 +811,8 @@ def analyze(run_dir, out_dir=None, har=None) -> dict:
     captured = {"poll": have_poll, "logcat": bool(logcat and logcat.get("lines")),
                 "appops": bool(after and after.get("ops")), "ps": bool(ps_rows),
                 "trace": "events" in files, "pcap": pcap is not None,
-                "decrypted": tls is not None or keylog is not None or har_result is not None}
+                "decrypted": tls is not None or keylog is not None or har_result is not None,
+                "cleartext": cleartext["checked"]}
     # Processes the poll saw until its last block, with only the front app's oom_score_adj (0),
     # while the app was no longer in front.
     last_block = (poll or {}).get("last_time")
@@ -780,10 +830,11 @@ def analyze(run_dir, out_dir=None, har=None) -> dict:
         "background": background,
         "network": network,
         "decrypted": decrypted,
+        "cleartext": cleartext,
         "timeline": timeline,
         "captured": captured,
         "limits": _limits(meta, missing, unreadable, poll, logcat, pcap, files, network, bool(target_pids),
-                          _decrypt_limits(meta, decrypted, har_error, endpoints)),
+                          _decrypt_limits(meta, decrypted, har_error, endpoints) + _cleartext_limits(cleartext)),
     }
     result["highlights"] = _highlights(result, have_poll, bool(target_pids), occurrences, new_not_top, kept_fg)
 
@@ -1014,10 +1065,14 @@ def _timeline(pkg, uid, poll, logcat, processes, occurrences, clipboard, files, 
             groups.setdefault((x["source"], x.get("host"), x["time"][:19]), []).append(x)
     for (source, host, _), xs in groups.items():
         methods = Counter(x["method"] for x in xs if x.get("method"))
-        text = ((f"解密到发往 {host} 的 {len(xs)} 个请求" if host else f"解密到 {len(xs)} 个不知道域名的请求")
-                + ("（" + "、".join(f"{m} {n}" for m, n in methods.items()) + "）" if methods else "")
-                + ("，来自代理 HAR 文件" if source == "har" else ""))
-        add(xs[0]["time"], "decrypted", text, bg=False if source == "har" else None)
+        if source == "cleartext":
+            text = f"没加密发往 {host} 的 {len(xs)} 个请求" if host else f"没加密发出 {len(xs)} 个不知道域名的请求"
+        else:
+            text = f"解密到发往 {host} 的 {len(xs)} 个请求" if host else f"解密到 {len(xs)} 个不知道域名的请求"
+        text += (("（" + "、".join(f"{m} {n}" for m, n in methods.items()) + "）" if methods else "")
+                 + ("，来自代理 HAR 文件" if source == "har" else ""))
+        add(xs[0]["time"], "cleartext" if source == "cleartext" else "decrypted", text,
+            bg=False if source == "har" else None)
     return _by_time(tl), _by_time(not_top)
 
 
@@ -1281,6 +1336,23 @@ def _highlights(result, have_poll, have_pids, occurrences, new_not_top, kept_fg)
         else:
             text = f"全系统抓包中没有域名，只有 {len(ips)} 个服务器的 IP 地址（不能确定哪些属于该应用）"
         info.append(text + "。")
+
+    clear = result.get("cleartext") or {}
+    if clear.get("exchanges"):
+        from aw import overview
+        s = overview.cleartext_summary([{"package": meta["package"],
+                                         "requests": [dict(x, front=None) for x in clear["exchanges"]]}])["apps"][0]
+        named = [f"{h}（{n} 个）" for h, n in s["hosts"] if h]
+        nameless = sum(n for h, n in s["hosts"] if not h)
+        if nameless:
+            named.append(f"只知道地址的服务器（{nameless} 个）")
+        sent_to = "、".join(named[:5])      # a space only before a name, not before Chinese text
+        notable.append(f"有 {s['requests']} 个请求没加密就发了出去（明文 HTTP），同一网络里的其他人和网络运营商都能看到内容："
+                       + ("发往 " if sent_to[:1].isascii() else "发往") + sent_to
+                       + (f" 等 {len(named)} 个服务器" if len(named) > 5 else "")
+                       + (f"；按字段名看，带了{'、'.join(s['kinds'])}类的字段" if s["kinds"] else "") + "。")
+    elif clear.get("checked") and clear.get("attributed"):
+        info.append("抓包里没有看到它没加密就发出去的请求（明文 HTTP）。")
 
     dec = result["decrypted"]
     if result["captured"].get("decrypted"):

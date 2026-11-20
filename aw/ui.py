@@ -145,7 +145,8 @@ class Stakeout:
         state.update(connected=True, serial=info["serial"], model=info["model"],
                      android=info["android"], root=True)
         missing = [name for name, ok in (("Wireshark", tshark), ("eCapture", ecapture)) if not ok]
-        state["message"] = (f"手机已连接，可以开始观察。电脑上缺少解密要用的 {'、'.join(missing)}，这次只能不解密。"
+        state["message"] = (f"手机已连接，可以开始观察。电脑上缺少解密要用的 {'、'.join(missing)}，这次只能不解密"
+                            + ("，也看不出哪些请求没加密。" if not tshark else "。")
                             if missing else "手机已连接，可以开始观察。")
         return state
 
@@ -293,6 +294,10 @@ class Stakeout:
         overview = self.make_overview(run_dir)
         self._read_names(dev, run_dir, overview)
         notes.insert(0, f"观察完成，列出了 {len(overview['apps'])} 个应用。" if phone else "观察完成。")
+        clear = (overview.get("cleartext") or {}).get("apps") or []
+        if clear:
+            notes.insert(1, f"{len(clear)} 个应用没加密就发出了请求，见结果最上面。" if phone
+                         else "它没加密就发出了请求，见结果最上面。")
         self._set(state="done", message="".join(notes))
 
     def _read_names(self, dev, run_dir, overview):

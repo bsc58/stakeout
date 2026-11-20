@@ -33,17 +33,38 @@ How the bytes become exchanges:
   control frames), not_http (not HTTP, or after bytes that break the protocol),
   response_without_request, server_push, incomplete_at_end (a frame or message head cut off by
   the end of the data).
+
+Cleartext HTTP (result "cleartext"; no key file needed: parse_cleartext):
+
+* A TCP connection without a TLS record is cleartext. tshark passes its payload on as data
+  (data.data), and with TCP reassembly that is each direction's byte stream in order, without
+  the retransmitted copies; after a missing segment nothing more of that direction comes out,
+  as for TLS. Such a connection is HTTP when the client's stream begins with an HTTP/1.x
+  request line or the HTTP/2 preface, on any port; other cleartext protocols are not listed.
+* A cleartext connection that began before the capture (no SYN in it) starts in the middle of
+  its streams: HTTP/1.x is read from the first client packet that begins with a request line,
+  and the server's stream from its first later packet that begins with a status line. The
+  bytes before are counted in its "undecoded" as began_before_capture.
+* Not listed, and not kept in memory: a connection with a loopback end (it never left the phone;
+  with a transparent proxy the same request would also be on the real interface), and one whose
+  client, from its SYN on, does not begin with HTTP. Of each direction at most PLAIN_MAX bytes
+  are kept; after that the direction ends as after a missing segment.
+* Its exchanges are read as above, with source "cleartext" and scheme "http" (HTTP/2: the
+  request's :scheme, else "http").
 """
 import bisect
 import collections
+import io
+import ipaddress
 import re
 import subprocess
+import tempfile
 import types
 from datetime import datetime, timedelta
 
 from aw import device, h2
 from aw.exchange import header
-from aw.parse_tls import _H1Msg, _REQUEST_LINE, _body, _h1_body, _local, _partial, _split_target
+from aw.parse_tls import _H1Msg, _REQUEST_LINE, _STATUS_LINE, _body, _h1_body, _local, _partial, _split_target
 
 
 class KeylogError(Exception):
@@ -61,6 +82,9 @@ _EPOCH = datetime(1970, 1, 1)
 _MAX_FRAME = (1 << 24) - 1      # frame lengths are not checked against SETTINGS_MAX_FRAME_SIZE
 _AT = types.SimpleNamespace(idx=0)     # _H1Msg wants a record; positions are tracked here instead
 _FIN, _SYN, _ACK = 0x01, 0x02, 0x10
+PLAIN_MAX = 16 * 1024 * 1024    # cleartext bytes kept per connection and direction
+# what the first bytes of an HTTP/1.x request can be (a method, then a space or nothing yet)
+_MAYBE_REQUEST = re.compile(rb"[A-Z][A-Z_-]{0,19}(?: |$)")
 
 
 # ---------------------------------------------------------------- tshark
@@ -73,18 +97,29 @@ def _run(cmd):
 
 
 def _tshark_lines(tshark, pcap, keys):
-    cmd = [tshark, "-r", str(pcap), "-o", f"tls.keylog_file:{keys}", "-o", "tcp.reassemble_out_of_order:TRUE",
+    """tshark's output lines, as they come (the whole output of a capture with large cleartext transfers
+    does not fit in memory). keys: the key file, or None (nothing is decrypted; cleartext payload still
+    comes out as data)."""
+    cmd = [tshark, "-r", str(pcap)] + (["-o", f"tls.keylog_file:{keys}"] if keys is not None else []) + [
+           "-o", "tcp.reassemble_out_of_order:TRUE",
            "--only-protocols", "sll,ip,ipv6,tcp,tls,data", "-Y", "tcp", "-T", "fields"]
     for f in _FIELDS:
         cmd += ["-e", f]
-    p = _run(cmd)
-    err = p.stderr.decode("utf-8", "replace")
+    with tempfile.TemporaryFile() as errf:
+        try:
+            p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=errf)
+        except OSError as e:
+            raise KeylogError(f"无法运行 tshark（{cmd[0]}）：{e.strerror or e}。") from e
+        with p, io.TextIOWrapper(p.stdout, encoding="utf-8", errors="replace", newline="\n") as out:
+            for line in out:
+                yield line.rstrip("\n")
+        errf.seek(0)
+        err = errf.read().decode("utf-8", "replace")
     # a capture cut off inside its last packet (tcpdump stopped mid-write): tshark reads every
     # packet before it and then exits with an error; that is content, not a failure
     if p.returncode and "cut short in the middle of a packet" not in err:
         line = next((l.strip() for l in err.splitlines() if l.strip()), "")
         raise KeylogError(f"tshark 读取抓包时出错（退出码 {p.returncode}）：{line}")
-    return p.stdout.decode("utf-8", "replace").splitlines()
 
 
 def _version(tshark):
@@ -126,7 +161,7 @@ class _Dir:
     def __init__(self):
         self.buf = bytearray()
         self.starts, self.times, self.seqs = [], [], []
-        self.fin = self.lost = False
+        self.fin = self.lost = self.full = False
 
     def add(self, data, t, seq):
         self.starts.append(len(self.buf))
@@ -151,7 +186,11 @@ class _Conn:
         self.tls = False
         self.sni = self.alpn = self.version = None
         self.alpns, self.server_hellos = [], []     # (sender, value) until the client is known
-        self.dirs = collections.defaultdict(_Dir)
+        self.dirs = collections.defaultdict(_Dir)   # decrypted TLS application data
+        self.plain = collections.defaultdict(_Dir)  # payload outside TLS records (cleartext)
+        self.cleartext = False
+        self.drop = _loopback(src) or _loopback(dst)  # cleartext not kept (module docstring)
+        self.skipped = 0            # cleartext bytes before the first readable message (began_before_capture)
 
     def finish(self):
         a, b = self.ends
@@ -186,10 +225,11 @@ def _connections(lines, offset):
         if flags & (_SYN | _ACK) == _SYN and c.syn is None:
             c.syn = src
         d = c.dirs[src]
-        if flags & _FIN:
-            d.fin = True
-        if lost:
-            d.lost = True
+        for x in (d, c.plain[src]):
+            if flags & _FIN:
+                x.fin = True
+            if lost:
+                x.lost = True
         if recver:
             c.tls = True
         hs = hstype.split(",") if hstype else []
@@ -203,10 +243,60 @@ def _connections(lines, offset):
             c.alpns.append((src, alpn))
         if data and recver:
             d.add(b"".join(bytes.fromhex(x) for x in data.split(",")), _time(epoch, offset), seq)
-    out = [c for c in conns.values() if c.tls]
-    for c in out:
+        elif data and not c.drop:
+            p = c.plain[src]
+            if p.full:
+                continue
+            chunk = b"".join(bytes.fromhex(x) for x in data.split(","))
+            if not p.buf and src == c.syn and not (_MAYBE_REQUEST.match(chunk) or h2.PREFACE.startswith(chunk[:24])):
+                c.drop = True           # the client's stream does not begin with HTTP
+                c.plain = collections.defaultdict(_Dir)
+            elif len(p.buf) + len(chunk) > PLAIN_MAX:
+                p.full = p.lost = True  # ends here, as after a missing segment
+            else:
+                p.add(chunk, _time(epoch, offset), seq)
+    out = []
+    for c in conns.values():
+        if not c.tls:
+            c.dirs, c.cleartext = c.plain, True
         c.finish()
+        if c.tls or _cleartext_http(c):
+            out.append(c)
     return sorted(out, key=lambda c: c.id)
+
+
+def _loopback(ipport):
+    try:
+        return ipaddress.ip_address(ipport.rpartition(":")[0].strip("[]")).is_loopback
+    except ValueError:
+        return False
+
+
+def _cleartext_http(c):
+    """Whether cleartext connection c is HTTP; one that began before the capture is cut to its
+    first request and the server's first response after it (module docstring)."""
+    if c.drop or not c.c.buf:
+        return False
+    if c.c.buf.startswith(h2.PREFACE) or (c.syn is not None and _REQUEST_LINE.match(c.c.buf)):
+        return True
+    if c.syn is not None:
+        return False
+    i = next((i for i, p in enumerate(c.c.starts) if _REQUEST_LINE.match(c.c.buf, p)), None)
+    if i is None:
+        return False
+    j = next((j for j, p in enumerate(c.s.starts)
+              if c.s.seqs[j] > c.c.seqs[i] and _STATUS_LINE.match(c.s.buf, p)), len(c.s.starts))
+    c.skipped = _cut(c.c, i) + _cut(c.s, j)
+    return True
+
+
+def _cut(d, i):
+    """Drops d's bytes before its packet i (all of them when there is none); how many."""
+    n = d.starts[i] if i < len(d.starts) else len(d.buf)
+    del d.buf[:n]
+    d.starts = [s - n for s in d.starts[i:]]
+    d.times, d.seqs = d.times[i:], d.seqs[i:]
+    return n
 
 
 # ---------------------------------------------------------------- parsing one connection
@@ -216,6 +306,7 @@ class _Parser:
         self.conn = conn
         self.exchanges = []         # (time, position, exchange)
         self.undecoded = collections.Counter()
+        self.scheme = "http" if conn.cleartext else "https"
 
     def run(self):
         c = self.conn
@@ -295,7 +386,7 @@ class _Parser:
         method, target = method.decode(), h2.text(target)
         path, query = _split_target(target, method)
         host = target if method == "CONNECT" else header(headers, "host")
-        ex = self._exchange(version.decode().lower(), c.c.time_at(r["pos"]), method, "https", host, path, query,
+        ex = self._exchange(version.decode().lower(), c.c.time_at(r["pos"]), method, self.scheme, host, path, query,
                             headers + req.trailers, _h1_body(req), req.complete)
         partial = [] if req.complete else ["request_incomplete"]
         if resp is None:
@@ -416,7 +507,7 @@ class _Parser:
         method = pseudo.get(":method")
         path, query = _split_target(pseudo[":path"], method) if ":path" in pseudo else (None, [])
         host = pseudo.get(":authority") or header([kv for kv in known if not kv[0].startswith(":")], "host")
-        ex = self._exchange("h2", c.c.time_at(st.pos), method, pseudo.get(":scheme", "https"), host, path, query,
+        ex = self._exchange("h2", c.c.time_at(st.pos), method, pseudo.get(":scheme", self.scheme), host, path, query,
                             known, _body(bytes(st.req_body), known, restored), st.req_ended)
         if not st.req_ended:
             partial.append("request_incomplete")
@@ -454,7 +545,7 @@ class _Parser:
             default = {"https": ":443", "http": ":80"}.get(scheme)
             if default and host.endswith(default):
                 host = host[:-len(default)]
-        return {"source": "keylog", "time": time, "protocol": protocol,
+        return {"source": "cleartext" if self.conn.cleartext else "keylog", "time": time, "protocol": protocol,
                 "method": method, "scheme": scheme, "host": host or None, "path": path, "query": query,
                 "request": {"headers": headers, "body": body, "complete": complete},
                 "response": None, "pid": None, "thread": None, "partial": [],
@@ -480,24 +571,39 @@ def _decode(dec, block):
         return None, 0, h2.Decoder(start_known=False)
 
 
-def parse_keylog(pcap_path, keys_path, utc_offset="+0000", tshark=None) -> dict:
-    keys, randoms = _read_keys(keys_path)
+def _tshark(pcap_path, tshark):
     with open(pcap_path, "rb"):
         pass                                # a missing capture is FileNotFoundError, as for every parser
     exe = device.find_tshark(tshark)
     if exe is None:
         raise KeylogError("找不到 tshark：请安装 Wireshark，或用环境变量 AW_TSHARK 指定 tshark 的路径。")
-    version = _version(exe)
+    return exe, _version(exe)
+
+
+def parse_keylog(pcap_path, keys_path, utc_offset="+0000", tshark=None) -> dict:
+    """The TLS connections and their decrypted exchanges, and under "cleartext" what parse_cleartext
+    returns (without "tshark"): one tshark run reads both."""
+    keys, randoms = _read_keys(keys_path)
+    exe, version = _tshark(pcap_path, tshark)
     return {"tshark": version, "keys": keys,
             **_build(_tshark_lines(exe, pcap_path, keys_path), utc_offset, randoms)}
 
 
+def parse_cleartext(pcap_path, utc_offset="+0000", tshark=None) -> dict:
+    """The capture's cleartext HTTP, no key file needed: {"tshark", "connections", "exchanges",
+    "undecoded"}; a connection is {"id", "time", "client", "server", "began_in_capture", "sent",
+    "received", "protocol", "exchanges"}, its exchanges have source "cleartext"."""
+    exe, version = _tshark(pcap_path, tshark)
+    return {"tshark": version, **_build(_tshark_lines(exe, pcap_path, None), utc_offset)["cleartext"]}
+
+
 def _build(lines, utc_offset, randoms=frozenset()):
-    """connections, exchanges and undecoded from tshark's output lines; randoms: the client randoms the
-    key file has keys for (a connection's "key")."""
-    conns = _connections(lines, utc_offset)
-    out_conns, exchanges, undecoded = [], [], collections.Counter()
-    for c in conns:
+    """connections, exchanges and undecoded from tshark's output lines, the TLS ones at the top and
+    the cleartext ones under "cleartext"; randoms: the client randoms the key file has keys for (a
+    connection's "key")."""
+    out = {False: ([], [], collections.Counter()), True: ([], [], collections.Counter())}
+    for c in _connections(lines, utc_offset):
+        out_conns, exchanges, undecoded = out[c.cleartext]
         decrypted = bool(c.c.buf or c.s.buf)
         protocol, n = None, 0
         if decrypted:
@@ -506,6 +612,12 @@ def _build(lines, utc_offset, randoms=frozenset()):
             protocol, n = p.protocol, len(p.exchanges)
             exchanges += [(t, c.id, pos, ex) for t, pos, ex in p.exchanges]
             undecoded.update(p.undecoded)
+        if c.cleartext:
+            undecoded["began_before_capture"] += c.skipped
+            out_conns.append({"id": c.id, "time": c.time, "client": c.client, "server": c.server,
+                              "began_in_capture": c.syn is not None, "sent": len(c.c.buf),
+                              "received": len(c.s.buf), "protocol": protocol, "exchanges": n})
+            continue
         out_conns.append({"id": c.id, "time": c.time, "client": c.client, "server": c.server,
                           "sni": c.sni, "alpn": c.alpn, "tls": c.version, "handshake_seen": c.hello is not None,
                           # the key file has the ClientHello's client random: a connection can have its key
@@ -513,7 +625,12 @@ def _build(lines, utc_offset, randoms=frozenset()):
                           "key": c.random is not None and c.random in randoms,
                           "decrypted": decrypted, "sent": len(c.c.buf), "received": len(c.s.buf),
                           "protocol": protocol, "exchanges": n})
-    exchanges.sort(key=lambda x: x[:3])
-    reasons = {k: v for k, v in sorted(undecoded.items()) if v}
-    return {"connections": out_conns, "exchanges": [x[3] for x in exchanges],
-            "undecoded": {"bytes": sum(reasons.values()), "reasons": reasons}}
+
+    def part(cleartext):
+        conns, exchanges, undecoded = out[cleartext]
+        exchanges.sort(key=lambda x: x[:3])
+        reasons = {k: v for k, v in sorted(undecoded.items()) if v}
+        return {"connections": conns, "exchanges": [x[3] for x in exchanges],
+                "undecoded": {"bytes": sum(reasons.values()), "reasons": reasons}}
+
+    return {**part(False), "cleartext": part(True)}

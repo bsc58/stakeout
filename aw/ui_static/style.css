@@ -212,6 +212,16 @@ button.stop:disabled { opacity: 0.5; cursor: default; }
 .result-meta { color: var(--muted); font-size: 14px; }
 .loading, .empty { color: var(--muted); padding: 12px 0; }
 
+.cleartext {
+  margin-bottom: 18px; padding: 14px 18px; background: var(--surface); border: 1px solid var(--line);
+  border-radius: var(--radius); box-shadow: var(--shadow);
+}
+.cleartext.found { border-left: 4px solid var(--high); }
+.cleartext h3 { margin-bottom: 6px; }
+.cleartext > p { max-width: 720px; font-size: 15px; }
+.cleartext .table-wrap { margin-top: 10px; }
+.cleartext .note { margin-top: 8px; color: var(--muted); font-size: 14px; }
+
 .explain { margin-bottom: 14px; }
 .order { max-width: 680px; font-size: 15px; }
 .legend { list-style: none; margin: 10px 0 0; padding: 0; display: flex; flex-wrap: wrap; gap: 4px 20px; font-size: 13px; color: var(--muted); }

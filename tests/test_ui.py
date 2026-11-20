@@ -361,6 +361,7 @@ class DeviceTest(ServerTest):
         self.assertFalse(d["tshark"])
         self.assertIn("Wireshark", d["message"])
         self.assertIn("不解密", d["message"])
+        self.assertIn("也看不出哪些请求没加密", d["message"])
 
     def test_apps(self):
         status, apps = self.get("/api/apps")

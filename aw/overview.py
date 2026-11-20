@@ -13,12 +13,17 @@ How the facts are read:
   (upper case and underscores) stands for one thing, and `count` is how often it was accessed.
 - `front` None (not known whether the app was in front) counts as seen, but not as seen while not in front.
 - sent_data weighs 2 only when a request carried one of the kinds of information below; otherwise 1.
+- A request with source "cleartext" went out without encryption (cleartext HTTP, read straight from the capture);
+  the others were decrypted. sent_data counts both, its bar's "cleartext" the cleartext ones, and the overview's
+  "cleartext" (cleartext_summary) lists per app what went out without encryption.
 """
 
 import bisect
+import ipaddress
 import json
 import re
 import shutil
+import unicodedata
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
@@ -115,7 +120,7 @@ _CAMEL = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
 _PAIR_NAME = re.compile(r"(?:^|[&;,?#\s])([A-Za-z_][\w.-]{0,63})\s*=")
 _JSON_KEY = re.compile(r'"((?:[^"\\\r\n]|\\.){1,64})"\s*:')
 
-DOWNLOAD_TITLE = {"requests.har": "解密出的全部请求（HAR 格式，含完整内容）",
+DOWNLOAD_TITLE = {"requests.har": "看到的全部请求（HAR 格式，含完整内容）",
                   "detail.json": "全部明细（JSON 格式，含技术名称）",
                   "report.html": "详细报告（网页）"}
 _HTTP_VERSION = {"h2": "HTTP/2", "http/1.1": "HTTP/1.1", "http/1.0": "HTTP/1.0", "h3": "HTTP/3"}
@@ -166,6 +171,32 @@ _TOKEN_LABEL = re.compile(r"(?=[^.]*[0-9])(?=[^.]*[A-Za-z])[A-Za-z0-9_-]{32,}")
 def _shown_host(host):
     """A server's name as the page shows it: a label that looks like an identifier is replaced."""
     return ".".join("〈编号〉" if _TOKEN_LABEL.fullmatch(p) else p for p in host.split("."))
+
+
+def _is_address(host):
+    """Whether a request's host (as in its Host header: a port, brackets and a zone may come with it) is a
+    server address, not a name. A cleartext request's Host is often one; the page shows no addresses."""
+    h = host.strip()
+    if h.startswith("["):
+        h = h[1:].partition("]")[0]
+    elif h.count(":") == 1:
+        h = h.partition(":")[0]
+    try:
+        ipaddress.ip_address(h.partition("%")[0])
+        return True
+    except ValueError:
+        return False
+
+
+def _request_host(host):
+    """A request's host as the page shows it; None when there is no name (none, or only an address)."""
+    if not host or _is_address(host):
+        return None
+    return _shown_host(host)
+
+
+def _cleartext(x):
+    return x.get("source") == "cleartext"
 
 
 def _level(weight, front, background):
@@ -420,18 +451,27 @@ def _sent_part(requests, technical):
     n = len(per)
     b = sum(1 for x, _ in per if x.get("front") is False)
     u = sum(1 for x, _ in per if x.get("front") is None)
+    clear = sum(1 for x, _ in per if _cleartext(x))
     hosts = Counter(x.get("host") for x, _ in per)
     with_kind = Counter(k for _, ks in per for k in ks)
     order = [k for k in KIND_ZH if with_kind[k]]
     tail, when = _when_tail(n, b, u, " 个")
     if when and b:
         when = f"{b} 个是在你没打开它的时候发的"
-    summary = (f"解密后看到它发出了 {n} 个请求，发往 {len(hosts)} 个服务器" + tail + _among([when] if when else [])
+    if not clear:
+        lead = f"解密后看到它发出了 {n} 个请求"
+    elif clear == n:
+        lead = f"看到它没加密就发出了 {n} 个请求（明文 HTTP）"
+    else:
+        lead = f"看到它发出了 {n} 个请求（{n - clear} 个是解密后看到的，{clear} 个没加密，用的是明文 HTTP）"
+    summary = (lead + f"，发往 {len(hosts)} 个服务器" + tail + _among([when] if when else [])
                + "。" + _unknown_sentence(n, u, " 个"))
     if order:
         summary += "按字段名来看，" + "，".join(f"{with_kind[k]} 个请求里有{KIND_ZH[k]}类的字段" for k in order) + "。"
     else:
         summary += "按字段名来看，请求里没有设备标识、账号标识、位置、手机的网络地址或登录凭据类的字段。"
+    if clear:
+        summary += "没加密的请求在路上谁都看得到：同一个网络里的其他人（例如同一个 Wi-Fi 上的人）和网络运营商都能看到它的内容。"
     binary = sum(1 for x, _ in per if ((x.get("request") or {}).get("body") or {}).get("kind") == "binary")
     if binary:
         summary += f"有 {binary} 个请求发出的内容不是文字，看不出里面带了什么。"
@@ -440,25 +480,94 @@ def _sent_part(requests, technical):
     if order:
         text += "，含" + "、".join(KIND_ZH[k] for k in order[:2]) + ("等" if len(order) > 2 else "") + "字段"
     if technical:
-        columns = ["时间", "方法", "服务器", "路径", "状态", "当时", "带了哪些信息", "字段名", "不完整的原因"]
+        columns = ["时间", "方法", "服务器", "路径", "状态", "当时", "带了哪些信息", "字段名", "不完整的原因", "加密"]
         rows = [[x.get("time") or "", x.get("method") or "", x.get("host") or "", x.get("path") or "",
                  (x.get("response") or {}).get("status") or "", WHEN_ZH[x.get("front")],
                  "、".join(KIND_ZH[k] for k in KIND_ZH if k in ks),
-                 "、".join(sorted({nm for c in ks.values() for nm in c})), "、".join(x.get("partial") or [])]
+                 "、".join(sorted({nm for c in ks.values() for nm in c})), "、".join(x.get("partial") or []),
+                 "没加密（明文 HTTP）" if _cleartext(x) else "解密后看到"]
                 for x, ks in per]
     else:
-        columns = ["服务器", "请求数", "你没打开它时", "带了哪些信息"]
+        columns = ["服务器", "请求数"] + (["其中没加密"] if clear else []) + ["你没打开它时", "带了哪些信息"]
         rows = []
         for host, count in sorted(hosts.items(), key=lambda hc: (-hc[1], hc[0] or "")):
             mine = [(x, ks) for x, ks in per if x.get("host") == host]
             kinds = {k for _, ks in mine for k in ks}
-            rows.append([_shown_host(host) if host else "（不知道域名）", count,
-                         sum(1 for x, _ in mine if x.get("front") is False),
-                         "、".join(KIND_ZH[k] for k in KIND_ZH if k in kinds) or "—"])
+            rows.append([_request_host(host) or "（不知道域名）", count]
+                        + ([sum(1 for x, _ in mine if _cleartext(x))] if clear else [])
+                        + [sum(1 for x, _ in mine if x.get("front") is False),
+                           "、".join(KIND_ZH[k] for k in KIND_ZH if k in kinds) or "—"])
     return {"key": "sent_data", "weight": WEIGHT["sent_data"] if order else 1,
             "front": b < n, "background": b > 0,
-            "text": text, "count": n, "background_count": b, "denied": 0,
+            "text": text, "count": n, "background_count": b, "denied": 0, "cleartext": clear,
             "summary": summary, "columns": columns, "rows": rows}
+
+
+def cleartext_summary(facts_list, checked=True, note=None, unattributed=(), system=0) -> dict:
+    """The overview's "cleartext": which apps sent requests without encryption (source "cleartext"), with names and
+    counts only. facts_list: the listed apps' facts; checked: whether the capture was read for them (note: why not,
+    one sentence); unattributed: the cleartext requests no app could be found for; system: how many the system sent."""
+    apps = []
+    for f in facts_list:
+        xs = [x for x in f.get("requests") or [] if _cleartext(x)]
+        if not xs:
+            continue
+        hosts = Counter(_request_host(x.get("host")) for x in xs)
+        kinds = {k for x in xs for k in _kinds(x)}
+        apps.append({"package": f["package"], "label": f.get("label"), "requests": len(xs),
+                     "background": sum(1 for x in xs if x.get("front") is False),
+                     "hosts": [[h, c] for h, c in sorted(hosts.items(), key=lambda hc: (-hc[1], hc[0] is None, hc[0] or ""))],
+                     "kinds": [KIND_ZH[k] for k in KIND_ZH if k in kinds]})
+    apps.sort(key=lambda a: (-len(a["kinds"]), -a["requests"], a["package"]))
+    others = Counter(_request_host(x.get("host")) for x in unattributed)
+    return {"checked": bool(checked), "note": note, "requests": sum(a["requests"] for a in apps), "apps": apps,
+            "unattributed": {"requests": len(unattributed),
+                             "hosts": [[h, c] for h, c in sorted(others.items(), key=lambda hc: (-hc[1], hc[0] is None, hc[0] or ""))]},
+            "system": system}
+
+
+def _hosts_text(hosts, limit=5):
+    """"发往 a.example（2 次）、…": a space only before a name, not before Chinese text."""
+    named = [f"{h}（{c} 次）" for h, c in hosts if h]
+    nameless = sum(c for h, c in hosts if not h)
+    if nameless:
+        named.append(f"只知道地址的服务器（{nameless} 次）")
+    text = "、".join(named[:limit]) + (f" 等 {len(named)} 个" if len(named) > limit else "")
+    return ("发往 " if text[:1].isascii() else "发往") + text
+
+
+def cleartext_lines(overview: dict, names=None) -> list:
+    """The overview's "cleartext" as plain sentences (the terminal after a run); [] for an overview without it.
+    An app is named by its label from overview["apps"], else from names ({package: label}), else by its package.
+    The names are the apps' own text (a request's Host, an app's label): their control characters are left out,
+    so that they cannot drive the terminal."""
+    c = overview.get("cleartext")
+    if not c:
+        return []
+    if not c.get("checked"):
+        return [f"没加密的请求（明文 HTTP）：这次看不出来。{c.get('note') or ''}".rstrip()]
+    labels = dict(names or {})
+    labels.update({a["package"]: a["label"] for a in overview.get("apps") or [] if a.get("label")})
+    apps, other = c.get("apps") or [], c.get("unattributed") or {}
+    if apps:
+        lines = [f"没加密的请求（明文 HTTP）：{len(apps)} 个应用没加密就发出了请求，同一网络里的其他人和运营商都能看到内容。"]
+        for a in apps:
+            name = labels.get(a["package"]) or a.get("label")
+            who = f"{name}（{a['package']}）" if name else a["package"]
+            line = f"  {who}：{a['requests']} 次"
+            if a.get("background"):
+                line += f"，其中 {a['background']} 次在你没打开它的时候"
+            line += f"；{_hosts_text(a['hosts'])}"
+            line += f"；带了{'、'.join(a['kinds'])}类的字段" if a.get("kinds") else "；按字段名看没带设备、账号、位置这类信息"
+            lines.append(line + "。")
+    else:
+        lines = ["没加密的请求（明文 HTTP）：这次没有看到哪个应用没加密就发请求。"]
+    if other.get("requests"):
+        lines.append(f"  另有 {other['requests']} 个没加密的请求不知道是哪个应用发的（可能是连接太短，没对上应用），"
+                     f"{_hosts_text(other.get('hosts') or [])}。")
+    if c.get("system"):
+        lines.append(f"  系统本身没加密发了 {c['system']} 个请求，没有算到应用上。")
+    return ["".join(ch for ch in line if unicodedata.category(ch) != "Cc") for line in lines]
 
 
 # -- the app ----------------------------------------------------------------------------------------------
@@ -486,7 +595,7 @@ def build_app(facts: dict) -> dict:
     return {"package": facts["package"], "uid": facts.get("uid"), "label": facts.get("label"),
             "third_party": bool(facts.get("third_party")), "score": score,
             "bars": [{"key": p["key"], "text": p["text"], "count": p["count"], "background": p["background_count"],
-                      "denied": p["denied"], "level": p["level"]} for p in parts],
+                      "denied": p["denied"], "cleartext": p.get("cleartext", 0), "level": p["level"]} for p in parts],
             "sections": [{"key": p["key"], "title": TITLE[p["key"]], "summary": p["summary"], "columns": p["columns"],
                           "rows": p["rows"][:ROWS_MAX], "more": max(0, len(p["rows"]) - ROWS_MAX)} for p in parts],
             "downloads": []}
@@ -760,8 +869,10 @@ def _facts_of_result(result, run_dir=None):
     network = {"endpoints": endpoints, "connections": sum(e["connections"] for e in endpoints),
                "bytes": sum(e["bytes"] for e in endpoints), "not_decrypted": not_decrypted}
 
-    # A proxy's HAR can hold other apps' requests: those are not the app's.
+    # A proxy's HAR can hold other apps' requests: those are not the app's. The cleartext requests are the app's
+    # own already (analyze: by its sockets).
     requests = [dict(x, front=front.at(x.get("time"))) for x in dec.get("exchanges") or [] if x.get("source") != "har"]
+    requests += [dict(x, front=front.at(x.get("time"))) for x in (result.get("cleartext") or {}).get("exchanges") or []]
     return {"package": package, "uid": uid, "label": None,
             "third_party": _third_party(run_dir, package) if run_dir is not None else True,
             "events": events, "network": network, "requests": requests}
@@ -799,24 +910,48 @@ def _app_limits(result, facts, front):
                           + ("想看得更全：先在手机上彻底关掉这个应用，开始观察以后再打开它。" if before else ""))
     elif dec.get("ecapture"):
         limits.append("这次的解密只看得到它通过手机系统自带的加密方式收发的内容。")
-    elif not facts["requests"]:
-        limits.append("这次没有解密，看不到它发出去的具体内容。")
+    elif not any(not _cleartext(x) for x in facts["requests"]):
+        limits.append("这次没有解密，看不到它加密发出去的具体内容。")
     quic = sum(1 for e in net.get("endpoints") or [] if e.get("proto") == "udp" and e.get("port") == 443)
     if quic and dec.get("keylog"):
         limits.append(f"它有 {quic} 个连接用的是另一种加密传输方式，这种连接现在解不开。")
-    partial = sum(1 for x in facts["requests"] if x.get("partial"))
+    decrypted = [x for x in facts["requests"] if not _cleartext(x)]
+    partial = sum(1 for x in decrypted if x.get("partial"))
     if partial:
-        limits.append(f"解开的 {len(facts['requests'])} 个请求中，有 {partial} 个没有记录完整。")
+        limits.append(f"解开的 {len(decrypted)} 个请求中，有 {partial} 个没有记录完整。")
+    limits += _cleartext_limits(result.get("cleartext"))
     har_n = sum(1 for x in dec.get("exchanges") or [] if x.get("source") == "har")
     if har_n:
         limits.append(f"导入的代理录制文件里有 {har_n} 个请求，分不清是哪个应用发的，没有算进来。")
     return limits
 
 
+def _cleartext_limits(clear):
+    """What a one-app run's cleartext check (analyze: result["cleartext"]) could not see."""
+    if not clear:
+        return []
+    if not clear.get("checked"):
+        return [f"没有检查它有没有没加密就发出去的请求（{clear['error'].rstrip('。')}）。"] if clear.get("error") else []
+    if not clear.get("attributed"):
+        return ["没有轮询到它的连接：抓包里没加密的请求对不上它，没有列出。"]
+    return ["没加密的请求（明文 HTTP）是直接从抓包里读出来的：它的连接每 1–2 秒查看一次，很快就断开的连接对不上它，"
+            "这样的请求没有列出；不是 HTTP 的没加密内容也没有列出。"]
+
+
 def _device(meta):
     dev = meta.get("device") or {}
     name = " ".join(str(dev[k]) for k in ("brand", "model") if dev.get(k))
     return " · ".join(p for p in (name, f"Android {dev['android']}" if dev.get("android") else "") if p)
+
+
+def _cleartext_note(clear):
+    if clear.get("checked") and clear.get("attributed"):
+        return None
+    if clear.get("error"):
+        return clear["error"]
+    if clear.get("checked"):
+        return "没有轮询到这个应用的连接，抓包里的请求对不上它。"
+    return "没有抓包。"
 
 
 def _app_run(result, run_dir, write):
@@ -841,10 +976,14 @@ def _app_run(result, run_dir, write):
                 "run": {"id": run_dir.name, "scope": "app", "package": facts["package"], "device": _device(meta),
                         "start_time": meta.get("start_time"), "end_time": meta.get("end_time"),
                         "seconds": meta.get("duration_s"), "net": bool((result.get("captured") or {}).get("pcap")),
-                        "decrypt": bool(facts["requests"])},
+                        "decrypt": any(not _cleartext(x) for x in facts["requests"])},
                 # the one app is listed even when nothing was observed: its detailed report is still there
                 "apps": rank([app]),
                 "limits": _app_limits(result, facts, _Front(result.get("timeline") or []))}
+    clear = result.get("cleartext")
+    if clear is not None:       # results made before the cleartext check have none
+        overview["cleartext"] = cleartext_summary([facts], clear.get("checked") and clear.get("attributed"),
+                                                  _cleartext_note(clear))
     if write:
         (run_dir / "overview.json").write_text(json.dumps(overview, ensure_ascii=False, indent=1), encoding="utf-8")
     return overview

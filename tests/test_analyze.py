@@ -11,7 +11,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 import aw
-from aw import analyze
+from aw import analyze, overview, report
 from aw.exchange import make_body
 import stakeout
 
@@ -151,12 +151,17 @@ class KeylogError(Exception):
     """Stands for aw.parse_keylog.KeylogError."""
 
 
+NO_CLEARTEXT = {"tshark": "TShark (Wireshark) 4.6.10.", "connections": [], "exchanges": [],
+                "undecoded": {"bytes": 0, "reasons": {}}}
+
+
 class Harness:
     """Patches the five parser modules inside aw.analyze, and the three decrypted-traffic parsers
-    (imported by analyze only when a run has their files), for one test."""
+    (imported by analyze only when a run has their files), for one test. cleartext: what
+    parse_cleartext returns (a run with a capture and no key file)."""
 
     def __init__(self, poll=POLL, logcat=LOGCAT, dump_diff=DUMP_DIFF, files=FILES, pcap=PCAP,
-                 attributed=None, unattributed=UNATTRIBUTED, tls=None, har=None, keylog=None):
+                 attributed=None, unattributed=UNATTRIBUTED, tls=None, har=None, keylog=None, cleartext=NO_CLEARTEXT):
         self.poll = file_stub(poll)
         self.logcat = file_stub(logcat)
         self.dump = file_stub({"uid_state": "cch", "uid_modes": {}, "ops": {}})
@@ -168,6 +173,7 @@ class Harness:
         self.tls = file_stub(tls)
         self.har = har if callable(har) else file_stub(har)
         self.keylog = keylog if callable(keylog) else file_stub(keylog)
+        self.cleartext = cleartext if callable(cleartext) else file_stub(cleartext)
 
     def __enter__(self):
         info = lambda op: dict(zip(("zh", "category", "sensitive"), OPS.get(op, (op, "其他", False))))  # noqa: E731
@@ -182,7 +188,8 @@ class Harness:
             self.stack.enter_context(mock.patch.object(analyze, name, ns))
         for name, ns in (("parse_tls", SimpleNamespace(parse_tls_events=self.tls)),
                          ("parse_har", SimpleNamespace(parse_har=self.har)),
-                         ("parse_keylog", SimpleNamespace(parse_keylog=self.keylog, KeylogError=KeylogError))):
+                         ("parse_keylog", SimpleNamespace(parse_keylog=self.keylog, parse_cleartext=self.cleartext,
+                                                          KeylogError=KeylogError))):
             self.stack.enter_context(mock.patch.object(aw, name, ns, create=True))
         return self
 
@@ -379,7 +386,10 @@ class AnalyzeVariants(unittest.TestCase):
         self.assertEqual(r["files"], {"backend": "f2fs", "open_files": []})     # meta says f2fs; nothing to read
         self.assertEqual(r["permissions"], {"granted": [], "used": []})
         self.assertEqual(r["captured"], {"poll": False, "logcat": False, "appops": False, "ps": False,
-                                         "trace": False, "pcap": False, "decrypted": False})
+                                         "trace": False, "pcap": False, "decrypted": False, "cleartext": False})
+        self.assertEqual(r["cleartext"], {"checked": False, "error": None, "attributed": False, "tshark": None,
+                                          "connections": [], "exchanges": [],
+                                          "others": {"connections": 0, "requests": 0}})
         self.assertEqual(r["clipboard"], {"reads": 0, "blocked": 0, "writes": 0, "events": []})
         self.assertEqual(r["processes"]["procs"], [])
         self.assertEqual(r["timeline"], [])
@@ -1134,6 +1144,136 @@ class AnalyzeKeylog(unittest.TestCase):
         self.assertEqual(r["decrypted"]["keylog"], None)
 
 
+def cxchg(time, conn_id, host, path="/a", query=()):
+    """A synthetic cleartext exchange (parse_keylog.parse_cleartext)."""
+    x = kxchg(time, conn_id, "192.0.2.8:80", host, path)
+    x.update(source="cleartext", scheme="http", protocol="http/1.1", query=[list(q) for q in query])
+    return x
+
+
+C_SOCKETS = K_SOCKETS + [{"proto": "tcp", "ip": "192.0.2.8", "port": 80, "first_seen": T("10"), "last_seen": T("29"),
+                          "locals": ["10.0.0.2:40100"]}]
+CLEARTEXT = {
+    "tshark": "TShark (Wireshark) 4.6.10.",
+    "connections": [{"id": 30, "time": T("21.000"), "client": "10.0.0.2:40100", "server": "192.0.2.8:80",
+                     "began_in_capture": True, "sent": 50, "received": 20, "protocol": "http/1.1", "exchanges": 1},
+                    # to the same server from a local port the poll never saw on the app's sockets: not the app's
+                    {"id": 31, "time": T("21.500"), "client": "10.0.0.2:40999", "server": "192.0.2.8:80",
+                     "began_in_capture": True, "sent": 50, "received": 20, "protocol": "http/1.1", "exchanges": 1}],
+    "exchanges": [cxchg(T("22.000"), 30, "ads.example.com", "/collect", [("deviceId", "d3v1c3-secret-0001")]),
+                  cxchg(T("23.000"), 31, "other.example", "/b")],
+    "undecoded": {"bytes": 0, "reasons": {}},
+}
+
+
+class AnalyzeCleartext(unittest.TestCase):
+    """Cleartext HTTP (parse_cleartext, or the key route's "cleartext"): the app's by its sockets."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+
+    def run_with(self, files=("poll.txt", "net.pcap"), sockets=C_SOCKETS, **harness):
+        run = make_run(self.tmp.name, meta=dict(META, missing=[]), files=files)
+        harness.setdefault("attributed", copy.deepcopy(K_ENDPOINTS))
+        with Harness(poll=dict(POLL, sockets=sockets), **harness) as h:
+            r = analyze.analyze(run, Path(self.tmp.name) / "o")
+        return run, h, r
+
+    def test_server_known_by_address_only(self):
+        # the highlight has no space before the Chinese words that stand for the server
+        by_address = copy.deepcopy(CLEARTEXT)
+        by_address["exchanges"][0]["host"] = "192.0.2.8"
+        run, h, r = self.run_with(cleartext=by_address)
+        notable = [x["text"] for x in r["highlights"] if x["level"] == "notable"]
+        self.assertTrue(any("都能看到内容：发往只知道地址的服务器（1 个）；" in x for x in notable), notable)
+
+    def test_without_keys(self):
+        run, h, r = self.run_with(cleartext=CLEARTEXT)
+        self.assertEqual((h.cleartext.calls, h.keylog.calls), ([(run / "net.pcap", (), {"utc_offset": "-0500"})], []))
+        c = r["cleartext"]
+        self.assertEqual((c["checked"], c["error"], c["attributed"], c["others"]),
+                         (True, None, True, {"connections": 1, "requests": 1}))
+        self.assertEqual([(x["id"], x["source"], x["host"], x["path"]) for x in c["exchanges"]],
+                         [(1, "cleartext", "ads.example.com", "/collect")])
+        self.assertEqual([x["id"] for x in c["connections"]], [30])
+        self.assertTrue(r["captured"]["cleartext"])
+        self.assertFalse(r["captured"]["decrypted"])
+        self.assertEqual(r["decrypted"]["exchanges"], [])
+        self.assertIn({"time": T("22.000"), "kind": "cleartext", "text": "没加密发往 ads.example.com 的 1 个请求（GET 1）"},
+                      r["timeline"])
+        notable = [x["text"] for x in r["highlights"] if x["level"] == "notable"]
+        self.assertIn("有 1 个请求没加密就发了出去（明文 HTTP），同一网络里的其他人和网络运营商都能看到内容："
+                      "发往 ads.example.com（1 个）；按字段名看，带了设备标识类的字段。", notable)
+        self.assertTrue(any(x.startswith("没加密的 HTTP 请求是直接从抓包里读出来的") for x in r["limits"]))
+
+        ov = overview.from_app_result(r, run)
+        self.assertFalse(ov["run"]["decrypt"])
+        # at 10:00:22 another app is in front
+        self.assertEqual(ov["cleartext"]["apps"], [{"package": PKG, "label": None, "requests": 1, "background": 1,
+                                                     "hosts": [["ads.example.com", 1]], "kinds": ["设备标识"]}])
+        sent = next(b for b in ov["apps"][0]["bars"] if b["key"] == "sent_data")
+        self.assertEqual((sent["count"], sent["cleartext"]), (1, 1))
+        self.assertIn("这次没有解密，看不到它加密发出去的具体内容。", ov["limits"])
+        self.assertNotIn("d3v1c3-secret-0001", json.dumps(ov, ensure_ascii=False))
+
+        page = report.render(r)
+        self.assertIn('<section id="cleartext"', page)
+        self.assertLess(page.index('id="network"'), page.index('id="cleartext"'))
+        self.assertLess(page.index('id="cleartext"'), page.index('id="decrypted"'))
+        self.assertIn("没加密，直接从抓包读出 · http/1.1 · http", page)
+        self.assertNotIn("d3v1c3-secret-0001", page)
+        self.assertIn("d3v1c3-secret-0001", report.render(r, show_secrets=True))
+
+    def test_report_notes_and_older_results(self):
+        run, h, r = self.run_with(cleartext=CLEARTEXT)
+        page = report.render(r)
+        self.assertIn("没加密的请求的内容在“没加密的请求”一节。", page)
+        self.assertNotIn("没有记录传输的内容", page)
+        old = {k: v for k, v in r.items() if k != "cleartext"}          # a result made before the check
+        page = report.render(old)
+        self.assertIn('<section id="cleartext"', page)
+        self.assertIn("那时还不检查没加密的请求", page)
+
+    def test_capture_parse_net_cannot_read(self):
+        def bad_pcap(path):
+            raise ValueError("not a classic pcap file")
+        run = make_run(self.tmp.name, meta=dict(META, missing=[]), files=("poll.txt", "net.pcap"))
+        with Harness(poll=dict(POLL, sockets=C_SOCKETS), cleartext=CLEARTEXT) as h:
+            with mock.patch.object(analyze, "parse_net", SimpleNamespace(parse_pcap=bad_pcap, attribute=h.attribute,
+                                                                         hosts_unattributed=h.unattributed)):
+                r = analyze.analyze(run, Path(self.tmp.name) / "o")
+        self.assertEqual(len(h.cleartext.calls), 1)          # tshark may read what parse_net cannot
+        self.assertEqual([x["path"] for x in r["cleartext"]["exchanges"]], ["/collect"])
+
+    def test_with_the_key_route(self):
+        run, h, r = self.run_with(files=("poll.txt", "net.pcap", "tls_keys.log"),
+                                  keylog=dict(KEYLOG, cleartext=CLEARTEXT))
+        self.assertEqual(h.cleartext.calls, [])          # read by the key route's tshark run
+        self.assertEqual([x["id"] for x in r["decrypted"]["exchanges"]], [1, 2])
+        self.assertEqual([x["id"] for x in r["cleartext"]["exchanges"]], [3])
+        # the cleartext connections are not counted as encrypted ones
+        self.assertNotIn(30, [i for g in ("decrypted", "before_capture", "no_key")
+                              for i in r["decrypted"]["keylog"]["coverage"][g]["ids"]])
+
+    def test_without_the_apps_sockets(self):
+        run, h, r = self.run_with(cleartext=CLEARTEXT, sockets=[])
+        self.assertEqual((r["cleartext"]["attributed"], r["cleartext"]["exchanges"]), (False, []))
+        self.assertIn("轮询没有看到应用的连接：抓包里没加密的 HTTP 请求对不上它，没有列出", r["limits"])
+
+    def test_tshark_missing(self):
+        def failing(pcap, utc_offset="+0000", tshark=None):
+            raise KeylogError("找不到 tshark：请安装 Wireshark。")
+
+        run, h, r = self.run_with(cleartext=failing)
+        self.assertEqual((r["cleartext"]["checked"], r["cleartext"]["error"]), (False, "找不到 tshark：请安装 Wireshark。"))
+        self.assertFalse(r["captured"]["cleartext"])
+        self.assertIn("没能检查应用有没有没加密就发出去的请求（找不到 tshark：请安装 Wireshark）", r["limits"])
+        self.assertIn("没能检查它有没有没加密就发出去的请求：找不到 tshark：请安装 Wireshark。", report.render(r))
+        ov = overview.from_app_result(r, run)
+        self.assertEqual((ov["cleartext"]["checked"], ov["cleartext"]["note"]), (False, "找不到 tshark：请安装 Wireshark。"))
+
+
 class Matching(unittest.TestCase):
     """A dump entry or logcat line is the same occurrence as the nearest poll occurrence only."""
 
@@ -1270,7 +1410,8 @@ class Cli(unittest.TestCase):
         self.report = SimpleNamespace(render=mock.Mock(return_value="<html>ok</html>"))
         self.analyze_fn = mock.Mock(return_value={"meta": {}})
         # aw.overview, aw.phonewide and aw.ui (other owners' modules) as their interfaces in docs/CONTRACT_PHONE.md
-        self.overview = SimpleNamespace(write_app_run=mock.Mock(return_value={"format": 1}))
+        self.overview = SimpleNamespace(write_app_run=mock.Mock(return_value={"format": 1}),
+                                        cleartext_lines=mock.Mock(return_value=[]))
         self.phonewide = SimpleNamespace(analyze_phone=mock.Mock(return_value={"format": 1}))
         self.ui = SimpleNamespace(serve=mock.Mock(return_value=0))
         for target, attr, value in ((aw, "collect", self.collect), (aw, "report", self.report),

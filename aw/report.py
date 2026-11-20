@@ -9,9 +9,10 @@ somewhere in it is hidden too (SPREAD_MIN); the rest of the page is never change
 """
 
 import re
+from collections import Counter
 from html import escape
 
-from aw import __version__
+from aw import __version__, overview
 from aw.analyze import (DECRYPT_SOURCE_ZH, KEYLOG_GROUP_ZH, PARTIAL_ZH, RESULT_ZH,   # the same words as the
                         TRACE_CLOCK_S, coverage_text, decrypted_summary,          # highlights and timeline
                         keylog_coverage_text, start_cause)
@@ -25,7 +26,7 @@ UNKNOWN_STATE_ZH = "无法判断"    # analyze's state "unknown": the front stat
 CLIP_OP_ZH = {"read": "读取", "write": "写入"}
 CLIP_SOURCE_ZH = {"logcat": "系统日志", "appops": "轮询"}
 TIMELINE_KIND_ZH = {"front": "前台切换", "screen": "屏幕", "proc": "进程", "perm": "权限", "clipboard": "剪贴板",
-                    "file": "文件", "net": "网络", "decrypted": "解密内容"}
+                    "file": "文件", "net": "网络", "decrypted": "解密内容", "cleartext": "没加密的请求"}
 HOST_SOURCE_ZH = {"sni": "加密握手（SNI）", "dns": "域名解析（DNS）"}
 STARTED_BY_ZH = {"system": "系统启动", "app": "应用自己启动（app_process）"}
 
@@ -36,6 +37,7 @@ SECTIONS = [  # (id, heading); order fixed by the contract
     ("files", "文件访问"),
     ("processes", "进程与唤醒"),
     ("network", "网络"),
+    ("cleartext", "没加密的请求"),
     ("decrypted", "解密内容"),
     ("timeline", "时间线"),
     ("limits", "采集说明与局限"),
@@ -298,7 +300,8 @@ def _header(meta, fmt, filetrace, pcap, decrypt) -> str:
     methods = "、".join(["系统记录"] + (["内核文件跟踪"] if filetrace else []) + (["网络抓包"] if pcap else [])
                        + (["eCapture 解密"] if "ecapture" in decrypt else [])
                        + (["密钥解密"] if "keylog" in decrypt else [])
-                       + (["代理录制的 HAR 文件"] if "har" in decrypt else []))
+                       + (["代理录制的 HAR 文件"] if "har" in decrypt else [])
+                       + (["读取没加密的请求"] if "cleartext" in decrypt else []))
     dev = meta.get("device") or {}
     app = [f"<code>{_e(meta['package'])}</code>"]
     if meta.get("version_name"):
@@ -690,7 +693,7 @@ def _system_hosts(hosts, prefix="") -> list:
     ]
 
 
-def _network(net, meta, fmt, decrypted) -> str:
+def _network(net, meta, fmt, decrypted, cleartext=False) -> str:
     lead = "这一节列出应用连接过的网络服务器，以及大约收发了多少数据。"
     eps = net.get("endpoints") or []
     hosts = net.get("hosts_unattributed") or []
@@ -711,8 +714,10 @@ def _network(net, meta, fmt, decrypted) -> str:
         parts.append(_table(["服务器", "协议与端口", "域名来自", "首次", "最后", "发出", "收到"], rows,
                             cls=("w", "", "", "t", "t", "n", "n"), fold=f"查看全部 {len(eps)} 个服务器地址"))
         if pcap:
+            seen = (["没加密的请求的内容在“没加密的请求”一节"] if cleartext else []) + \
+                   (["解密到的传输内容在“解密内容”一节"] if decrypted else [])
             parts.append(_note("数据量是约数：抓包同时在多个网络接口上进行，同一个数据包可能被记录不止一次。"
-                               + ("解密到的传输内容在“解密内容”一节。" if decrypted else
+                               + ("，".join(seen) + "。" if seen else
                                   "本报告只记录连到了哪里、传了多少，没有记录传输的内容。")))
         else:
             parts.append(_note("本次采集没有抓取网络数据包，所以只有应用连接的地址和端口，没有域名和数据量。"))
@@ -758,6 +763,7 @@ def _host_names(result) -> str:
     names = [n for x in dec.get("exchanges") or [] for n in (x.get("host"), x.get("connection_host_tail"))]
     names += [e.get("host") for e in (net.get("endpoints") or []) + (net.get("hosts_unattributed") or [])]
     names += [c.get("sni") for c in (dec.get("keylog") or {}).get("connections") or []]
+    names += [x.get("host") for x in (result.get("cleartext") or {}).get("exchanges") or []]
     return "\n".join(str(n).lower() for n in names if n)
 
 
@@ -945,6 +951,49 @@ def _keylog_coverage(kl) -> list:
     return out
 
 
+def _each_request(xs, hosts, fmt, show_secrets, found) -> list:
+    """Every request in full, grouped by host in the order of hosts (the summary table's), then the rest as rows."""
+    parts = []
+    parts.append("<h3>每个请求</h3>")
+    if show_secrets:
+        parts.append(_note("这份报告显示了 Cookie、令牌、设备标识等值的原值（生成时用了 --show-secrets）。"
+                           "别人拿到这些值可能登录你的账号，请不要转发这份报告。"))
+    else:
+        parts.append(_note(SECRETS_NOTE))
+    # Grouped by host in the order of the summary table, by time within a host. Shown in full: each
+    # host's first request, then each host's second, … up to EXCHANGES_SHOWN, so that every host has
+    # requests shown before one host fills the page.
+    by_host = {}
+    for x in xs:
+        by_host.setdefault(x.get("host"), []).append(x)
+    order = list(dict.fromkeys([h.get("host") for h in hosts if h.get("host") in by_host] + list(by_host)))
+    rank = {x["id"]: k for group in by_host.values() for k, x in enumerate(group)}
+    full = {x["id"] for x in sorted(xs, key=lambda x: (rank[x["id"]], x["id"]))[:EXCHANGES_SHOWN]}
+    more = len(xs) > EXCHANGES_SHOWN
+    parts.append(f"<p>按域名分组，同一域名的请求按时间排列"
+                 f"{f'；共 {len(xs)} 个，下面完整列出 {EXCHANGES_SHOWN} 个（每个域名都列出一部分），其余的在最后的摘要表里' if more else ''}。"
+                 "点开一行可以看到请求和响应的头部与正文。</p>")
+    for host in order:
+        group = by_host[host]
+        shown = [x for x in group if x["id"] in full]
+        if not shown:
+            continue
+        count = f"{len(group)} 个请求" + (f"，其中 {len(group) - len(shown)} 个在最后的摘要表里" if len(shown) < len(group) else "")
+        parts.append(f'<h4 class="host">{_e(host or "（域名未知）")} <span class="note">{escape(count)}</span></h4>')
+        parts += [_exchange(x, fmt, show_secrets, found) for x in shown]
+    rest = [x for host in order for x in by_host[host] if x["id"] not in full]
+    if rest:
+        parts.append(f"<p>其余 {len(rest)} 个请求只列出摘要，完整内容在 result.json 里。</p>")
+        rows = [[_e(f"#{x.get('id')}"), fmt(x.get("time")), _e(x.get("method")),
+                 f"<code>{_e(_host_label(x) + _shown_path(x.get('path') or '', show_secrets, found))}</code>",
+                 "没有找到响应" if x.get("response") is None else _e(x["response"].get("status")),
+                 _body_size(x.get("request")), _body_size(x.get("response")),
+                 _e(DECRYPT_SOURCE_ZH.get(x.get("source"), x.get("source")))] for x in rest]
+        parts.append(_table(["编号", "时间", "方法", "域名与路径", "状态", "发出的正文", "收到的正文", "来源"], rows,
+                            cls=("n", "t", "", "w", "n", "n", "n", ""), fold=f"查看其余 {len(rest)} 个请求"))
+    return parts
+
+
 def _decrypted(dec, meta, fmt, show_secrets, endpoints=(), found=None) -> str:
     lead = "这一节列出解密后的 HTTPS 请求：应用发给了哪个服务器、发了什么、收到了什么。"
     ecap, har, kl = dec.get("ecapture"), dec.get("har"), dec.get("keylog")
@@ -1000,44 +1049,53 @@ def _decrypted(dec, meta, fmt, show_secrets, endpoints=(), found=None) -> str:
         parts.append(_table(["域名", "请求数", "方法", "来源", "发出的正文", "收到的正文", "最常见的路径"], rows,
                             cls=("w", "n", "", "", "n", "n", "w"), fold=f"查看全部 {len(hosts)} 个域名"))
 
-        parts.append("<h3>每个请求</h3>")
-        if show_secrets:
-            parts.append(_note("这份报告显示了 Cookie、令牌、设备标识等值的原值（生成时用了 --show-secrets）。"
-                               "别人拿到这些值可能登录你的账号，请不要转发这份报告。"))
-        else:
-            parts.append(_note(SECRETS_NOTE))
-        # Grouped by host in the order of the summary table, by time within a host. Shown in full: each
-        # host's first request, then each host's second, … up to EXCHANGES_SHOWN, so that every host has
-        # requests shown before one host fills the page.
-        by_host = {}
-        for x in xs:
-            by_host.setdefault(x.get("host"), []).append(x)
-        order = list(dict.fromkeys([h.get("host") for h in hosts if h.get("host") in by_host] + list(by_host)))
-        rank = {x["id"]: k for group in by_host.values() for k, x in enumerate(group)}
-        full = {x["id"] for x in sorted(xs, key=lambda x: (rank[x["id"]], x["id"]))[:EXCHANGES_SHOWN]}
-        more = len(xs) > EXCHANGES_SHOWN
-        parts.append(f"<p>按域名分组，同一域名的请求按时间排列"
-                     f"{f'；共 {len(xs)} 个，下面完整列出 {EXCHANGES_SHOWN} 个（每个域名都列出一部分），其余的在最后的摘要表里' if more else ''}。"
-                     "点开一行可以看到请求和响应的头部与正文。</p>")
-        for host in order:
-            group = by_host[host]
-            shown = [x for x in group if x["id"] in full]
-            if not shown:
-                continue
-            count = f"{len(group)} 个请求" + (f"，其中 {len(group) - len(shown)} 个在最后的摘要表里" if len(shown) < len(group) else "")
-            parts.append(f'<h4 class="host">{_e(host or "（域名未知）")} <span class="note">{escape(count)}</span></h4>')
-            parts += [_exchange(x, fmt, show_secrets, found) for x in shown]
-        rest = [x for host in order for x in by_host[host] if x["id"] not in full]
-        if rest:
-            parts.append(f"<p>其余 {len(rest)} 个请求只列出摘要，完整内容在 result.json 里。</p>")
-            rows = [[_e(f"#{x.get('id')}"), fmt(x.get("time")), _e(x.get("method")),
-                     f"<code>{_e(_host_label(x) + _shown_path(x.get('path') or '', show_secrets, found))}</code>",
-                     "没有找到响应" if x.get("response") is None else _e(x["response"].get("status")),
-                     _body_size(x.get("request")), _body_size(x.get("response")),
-                     _e(DECRYPT_SOURCE_ZH.get(x.get("source"), x.get("source")))] for x in rest]
-            parts.append(_table(["编号", "时间", "方法", "域名与路径", "状态", "发出的正文", "收到的正文", "来源"], rows,
-                                cls=("n", "t", "", "w", "n", "n", "n", ""), fold=f"查看其余 {len(rest)} 个请求"))
+        parts += _each_request(xs, hosts, fmt, show_secrets, found)
     return _section("decrypted", lead, "".join(parts))
+
+
+def _cleartext(clear, fmt, show_secrets, found=None) -> str:
+    lead = ("这一节列出它没加密就发出去的请求（明文 HTTP）：这些内容在网络上原样传输，同一网络里的其他人和网络运营商都能看到。"
+            "抓包里本来就有这些内容，不需要解密。")
+    if not clear.get("checked"):
+        text = (f"没能检查它有没有没加密就发出去的请求：{clear['error'].rstrip('。')}。" if clear.get("error")
+                else "本次没有抓包，无法检查。")
+        return _section("cleartext", lead, _empty(text))
+    if not clear.get("attributed"):
+        return _section("cleartext", lead, _empty("轮询没有看到应用的连接，抓包里没加密的请求对不上它（见“采集说明与局限”）。"))
+    xs = clear.get("exchanges") or []
+    others = (clear.get("others") or {}).get("requests") or 0
+    if not xs:
+        return _section("cleartext", lead, _empty(
+            "抓包里没有看到它没加密就发出去的请求。"
+            + (f"抓包里另有 {others} 个没加密的请求，是手机上其他程序的，或者对不上应用。" if others else "")))
+    groups = {}
+    for x in xs:
+        groups.setdefault(x.get("host"), []).append(x)
+    hosts = [{"host": h, "exchanges": len(g)} for h, g in sorted(groups.items(), key=lambda kv: (-len(kv[1]), kv[0] or ""))]
+    kinds_of = {x["id"]: overview._kinds(x) for x in xs}
+    with_kind = Counter(k for ks in kinds_of.values() for k in ks)
+    text = f"它没加密发出了 {len(xs)} 个请求，发往 {len(hosts)} 个服务器。"
+    if with_kind:
+        text += "按字段名来看，" + "，".join(f"{with_kind[k]} 个请求里有{overview.KIND_ZH[k]}类的字段"
+                                          for k in overview.KIND_ZH if with_kind[k]) + "。"
+    else:
+        text += "按字段名来看，请求里没有设备标识、账号标识、位置、手机的网络地址或登录凭据类的字段。"
+    parts = [f"<p>{escape(text)}</p>", "<h3>按域名汇总</h3>"]
+    rows = []
+    for h in hosts:
+        g = groups[h["host"]]
+        methods = Counter(x["method"] for x in g if x.get("method"))
+        kinds = {k for x in g for k in kinds_of[x["id"]]}
+        paths = Counter(x["path"] for x in g if x.get("path"))
+        rows.append([f"<strong>{_e(h['host'] or '（域名未知）')}</strong>", _num(len(g)),
+                     _e("、".join(f"{m} {n}" for m, n in methods.items()) or "—"),
+                     _e("、".join(overview.KIND_ZH[k] for k in overview.KIND_ZH if k in kinds) or "—"),
+                     "<br>".join(f"<code>{_e(_shown_path(p, show_secrets, found))}</code> {n} 次"
+                                 for p, n in sorted(paths.items(), key=lambda kv: (-kv[1], kv[0]))[:10]) or "—"])
+    parts.append(_table(["域名", "请求数", "方法", "带了哪些信息（按字段名）", "最常见的路径"], rows,
+                        cls=("w", "n", "", "", "w"), fold=f"查看全部 {len(hosts)} 个域名"))
+    parts += _each_request(xs, hosts, fmt, show_secrets, found)
+    return _section("cleartext", lead, "".join(parts))
 
 
 def _timeline(items, fmt) -> str:
@@ -1064,6 +1122,8 @@ def _limits(limits, filetrace, pcap, decrypt) -> str:
         how += "；用 eCapture 在应用建立加密连接时记下密钥，再在电脑上用 tshark 解开抓到的数据包"
     if "har" in decrypt:
         how += "；读取你自己用代理录制的 HAR 文件"
+    if "cleartext" in decrypt:
+        how += "；从抓到的数据包里读出没加密的 HTTP 请求"
     parts = [f"<p>采集方式：{how}。这些都在应用外部进行，不改动应用。</p>",
              '<ul class="plain">' + "".join(f"<li>{_e(x)}</li>" for x in limits) + "</ul>"]
     return _section("limits", lead, "".join(parts))
@@ -1080,11 +1140,17 @@ def render(result: dict, show_secrets: bool = False) -> str:
     filetrace, pcap = _filetrace_ran(files), _pcap_ran(net, meta)
     captured = result.get("captured") or {}     # which sources had data; a missing key counts as captured
     dec = result.get("decrypted") or {}         # absent in results made before v0.2
+    clear = result.get("cleartext")             # absent in results made before the cleartext check
     decrypt = [s for s in ("ecapture", "keylog", "har") if dec.get(s) is not None]    # the sources that were read
+    decrypt += ["cleartext"] if (clear or {}).get("checked") else []
     found = set()                               # the values the default report hides
     decrypted = _decrypted(dec, meta, fmt, show_secrets, net.get("endpoints") or [], found)
-    if not show_secrets:      # inside this section only: the header's package name, the network's addresses stay
+    cleartext = (_cleartext(clear, fmt, show_secrets, found) if clear is not None else _section(
+        "cleartext", "这一节列出它没加密就发出去的请求（明文 HTTP）。",
+        _empty("这份结果是较早的版本生成的，那时还不检查没加密的请求；用 analyze 重新分析这次采集就有这一节。")))
+    if not show_secrets:      # inside these sections only: the header's package name, the network's addresses stay
         decrypted = _hide_elsewhere(decrypted, found, _host_names(result))
+        cleartext = _hide_elsewhere(cleartext, found, _host_names(result))
     body = "".join([
         _header(meta, fmt, filetrace, pcap, decrypt),
         _highlights(result.get("highlights") or []),
@@ -1092,7 +1158,8 @@ def render(result: dict, show_secrets: bool = False) -> str:
         _clipboard(result.get("clipboard") or {}, fmt, captured),
         _files(files, fmt),
         _processes(result.get("processes") or {}, result.get("background") or {}, meta, fmt, captured),
-        _network(net, meta, fmt, bool(dec.get("exchanges"))),
+        _network(net, meta, fmt, bool(dec.get("exchanges")), bool((clear or {}).get("exchanges"))),
+        cleartext,
         decrypted,
         _timeline(result.get("timeline") or [], fmt),
         _limits(result.get("limits") or [], filetrace, pcap, decrypt),

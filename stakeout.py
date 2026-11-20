@@ -80,7 +80,8 @@ def _report(run_dir, out_dir, show_secrets=False, har=None, phone=False):
         return _fail(f"无法写入 {out_dir}：请用 --out 指定一个可写的目录。")
     if phone:
         from aw import phonewide
-        phonewide.analyze_phone(run_dir, out_dir)
+        ov = phonewide.analyze_phone(run_dir, out_dir)
+        _print_cleartext(ov)
         print(f"概览已生成：{out_dir / 'overview.json'}")
         return 0
     from aw import analyze, report
@@ -93,10 +94,20 @@ def _report(run_dir, out_dir, show_secrets=False, har=None, phone=False):
         return _fail(str(e))
     path = out_dir / "report.html"
     path.write_text(report.render(result, show_secrets=show_secrets), encoding="utf-8")
-    print(f"报告已生成：{path}")
     from aw import overview
-    overview.write_app_run(result, out_dir)
+    _print_cleartext(overview.write_app_run(result, out_dir))
+    print(f"报告已生成：{path}")
     return 0
+
+
+def _print_cleartext(ov):
+    """The overview's summary of what went out without encryption; the apps' names from the names cache."""
+    from aw import labels, overview
+    c = (ov or {}).get("cleartext") or {}
+    names = labels.labels(None, [{"package": a["package"]} for a in c.get("apps") or []],
+                          Path(__file__).resolve().parent / "cache" / "labels.json") if c.get("apps") else {}
+    for line in overview.cleartext_lines(ov or {}, names):
+        print(line)
 
 
 def _wait(seconds, max_seconds, phone=False):

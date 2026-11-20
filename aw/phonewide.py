@@ -538,8 +538,9 @@ def _host_of(pcap, flows, ip):
 
 # ---------------------------------------------------------------- network
 
-def _network(pcap, poll, keylog, groups, front, offset):
-    """Per app: the network facts, the decrypted requests and detail rows; and the run's counts.
+def _network(pcap, poll, keylog, groups, front, offset, clear=None):
+    """Per app: the network facts, the requests (decrypted, and cleartext from clear: parse_cleartext's result)
+    and detail rows; the run's counts; and the cleartext requests of no app.
     A connection is an app's when the S lines with its local address and port carry the app's uid:
     those to the same server, else any (a socket's local address and port name it while it is
     open). No S line, or S lines of several uids, leave it to no app."""
@@ -638,7 +639,24 @@ def _network(pcap, poll, keylog, groups, front, offset):
             out.setdefault(uid, {"network": {"endpoints": [], "connections": 0, "bytes": 0, "not_decrypted": 0},
                                  "connections": [], "tls": [], "requests": []})
             out[uid]["requests"].append({**x, "front": front.at(groups[uid]["packages"], x.get("time"))})
-    return out, counts
+    # Cleartext HTTP: its connections are attributed as every other (cleartext ids are tcp.stream numbers too,
+    # distinct from the TLS ones).
+    clear_of, nobody = {}, []
+    for c in (clear or {}).get("connections") or []:
+        w = whose("tcp", parse_net._norm_ipport(c["client"]), parse_net._norm_ipport(c["server"]))
+        clear_of[c["id"]] = w if isinstance(w, int) else ("system" if w == "system" else None)
+    for x in (clear or {}).get("exchanges") or []:
+        w = clear_of.get(x.get("connection"))
+        counts[f"cleartext_{'app' if isinstance(w, int) else w or 'unattributed'}"] += 1
+        if isinstance(w, int):
+            out.setdefault(w, {"network": {"endpoints": [], "connections": 0, "bytes": 0, "not_decrypted": 0},
+                               "connections": [], "tls": [], "requests": []})
+            out[w]["requests"].append({**x, "front": front.at(groups[w]["packages"], x.get("time"))})
+        elif w is None:
+            nobody.append(x)
+    for n in out.values():
+        n["requests"].sort(key=lambda x: x.get("time") or "")
+    return out, counts, nobody
 
 
 # ---------------------------------------------------------------- the run
@@ -712,15 +730,22 @@ def analyze_phone(run_dir, out_dir=None, labels=None) -> dict:
             missing.append("net.pcap")
     else:
         missing.append("net.pcap")
-    keylog = keylog_error = None
+    keylog = keylog_error = clear = clear_error = None
     if (run_dir / "tls_keys.log").exists() and pcap is not None:
         from aw import parse_keylog
         try:
             keylog = parse_keylog.parse_keylog(run_dir / "net.pcap", run_dir / "tls_keys.log",
                                                utc_offset=meta.get("utc_offset", "+0000"))
+            clear = keylog.get("cleartext")
         except parse_keylog.KeylogError as e:
-            keylog_error = str(e)
-    net, counts = _network(pcap, poll, keylog, groups, front, offset)
+            keylog_error = clear_error = str(e)
+    elif (run_dir / "net.pcap").exists():     # cleartext HTTP needs no key: a tshark run of its own
+        from aw import parse_keylog
+        try:
+            clear = parse_keylog.parse_cleartext(run_dir / "net.pcap", utc_offset=meta.get("utc_offset", "+0000"))
+        except parse_keylog.KeylogError as e:
+            clear_error = str(e)
+    net, counts, clear_nobody = _network(pcap, poll, keylog, groups, front, offset, clear)
 
     procs_by_uid = {}
     for (pid, uid), p in poll["procs"].items():
@@ -755,8 +780,9 @@ def analyze_phone(run_dir, out_dir=None, labels=None) -> dict:
             "third_party": g["third_party"], "events": events, "network": network,
             "permissions": occ, "processes": proc_rows, "files": file_rows,
             "connections": n.get("connections") or [], "tls_connections": n.get("tls") or [],
-            "requests": [{"time": x.get("time"), "method": x.get("method"), "host": x.get("host"),
-                          "path": x.get("path"), "status": (x.get("response") or {}).get("status"),
+            "requests": [{"time": x.get("time"), "method": x.get("method"), "scheme": x.get("scheme"),
+                          "host": x.get("host"), "path": x.get("path"),
+                          "status": (x.get("response") or {}).get("status"),
                           "connection": x.get("connection"), "front": x["front"]} for x in requests]}
 
     # An app whose only facts are operations the overview leaves out (wake locks and the like) has no bar.
@@ -778,13 +804,18 @@ def analyze_phone(run_dir, out_dir=None, labels=None) -> dict:
                       "decrypt": bool(counts["decrypted_app"] + counts["decrypted_system"]
                                       + counts["decrypted_unattributed"])},
               "apps": apps,
+              "cleartext": overview.cleartext_summary(
+                  facts_list, clear is not None,
+                  None if clear is not None else (clear_error or "没有抓包。"),
+                  clear_nobody, counts["cleartext_system"]),
               "limits": _limits(meta, missing, groups, len(apps), counts, keylog, keylog_error, samples, files,
-                                front, system_ops)}
+                                front, system_ops, clear, clear_error)}
     (out / "overview.json").write_text(json.dumps(result, ensure_ascii=False, indent=1), encoding="utf-8")
     return result
 
 
-def _limits(meta, missing, groups, listed, counts, keylog, keylog_error, samples, files, front, system_ops):
+def _limits(meta, missing, groups, listed, counts, keylog, keylog_error, samples, files, front, system_ops,
+            clear=None, clear_error=None):
     limits = [f"手机上共有 {len(groups)} 个应用（包括系统自带的），其中 {len(groups) - listed} 个在这次采集中"
               "没有用权限、读你的信息或者联网（防休眠、振动这类不算），没有列出。"]
     if "poll.txt" in missing:
@@ -802,6 +833,8 @@ def _limits(meta, missing, groups, listed, counts, keylog, keylog_error, samples
         system.append(f"{counts['flows_system']} 个网络连接")
     if counts["requests_system"]:
         system.append(f"解密出的 {counts['requests_system']} 个请求")
+    if counts["cleartext_system"]:
+        system.append(f"没加密的 {counts['cleartext_system']} 个请求")
     if system:
         limits.append("系统本身（不属于任何应用的系统程序）做的事没有算到应用上，也没有列出："
                       + "、".join(system) + "。")
@@ -825,6 +858,14 @@ def _limits(meta, missing, groups, listed, counts, keylog, keylog_error, samples
         limits.append(f"没能解密抓包（{keylog_error.rstrip('。')}）：这次没有解密的内容。")
     elif meta.get("decrypt") == "keylog":
         limits.append("要求了解密，但没有记录到密钥（tls_keys.log）：这次没有解密的内容。")
+    if clear is not None:
+        if counts["cleartext_unattributed"]:
+            limits.append(f"抓包里有 {counts['cleartext_unattributed']} 个没加密的请求不知道是哪个应用发的："
+                          "很快就结束的连接可能在两次查看之间没被看到，这些请求没有算到任何应用上。")
+        limits.append("没加密的请求（明文 HTTP）是直接从抓包里读出来的，不需要解密：只认得出 HTTP，别的没加密的内容没有列出；"
+                      "采集开始前就已连上的连接，只从抓到的第一个完整请求读起。")
+    elif clear_error:
+        limits.append(f"没能检查哪些请求没加密（{clear_error.rstrip('。')}）。")
     if samples:
         limits.append("权限的使用情况大约每 10 秒查看一次：两次查看之间同一项权限用了多次，只能看出一次，"
                       "所以写的是“至少”多少次。")

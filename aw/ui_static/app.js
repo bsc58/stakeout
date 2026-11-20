@@ -427,6 +427,7 @@
           !phone && only && only.label ? el('span', { class: 'pkg' }, only.package) : null),
         el('p', { class: 'result-meta' }, line),
         run.device ? el('p', { class: 'result-meta' }, run.device) : null),
+      cleartext(ov.cleartext, apps, phone),
       apps.length ? null : el('p', { class: 'empty' },
         '这段时间里，没有看到哪个应用用了权限、读了你的信息或者联网。'),
       apps.length ? explain(phone, mine.length, system.length) : null,
@@ -435,6 +436,44 @@
         el('summary', null, `系统自带的应用（${system.length} 个）`),
         appList(system, id, false)) : null,
       limits(ov.limits || [])].filter(Boolean));
+  }
+
+  // Which apps sent requests without encryption: names and counts only, at the top so it is seen first.
+  function cleartext(c, apps, phone) {
+    if (!c) return null;            // an overview made before the check
+    const head = el('h3', null, '没加密就发出去的请求（明文 HTTP）');
+    if (!c.checked) {
+      return el('section', { class: 'cleartext' }, head,
+        el('p', null, `这次看不出来。${c.note || ''}`));
+    }
+    const names = {};
+    for (const a of apps) if (a.label) names[a.package] = a.label;
+    const list = c.apps || [];
+    const other = c.unattributed || {};
+    const hosts = (hs) => {
+      const parts = hs.filter((h) => h[0]).map((h) => `${h[0]}（${fmtNumber(h[1])}）`);
+      const nameless = hs.filter((h) => !h[0]).reduce((n, h) => n + h[1], 0);
+      if (nameless) parts.push(`只知道地址的服务器（${fmtNumber(nameless)}）`);
+      return parts.length > 3 ? `${parts.slice(0, 3).join('、')} 等 ${parts.length} 个` : parts.join('、');
+    };
+    const toward = (text) => (/^[\x00-\x7f]/.test(text) ? `发往 ${text}` : `发往${text}`);
+    const who = phone ? `${list.length} 个应用` : '它';
+    const lead = list.length
+      ? `${who}没加密就发出了请求。这些请求在路上谁都看得到：同一个网络里的其他人（例如同一个 Wi-Fi 上的人）和网络运营商都能看到内容。`
+      : (phone ? '这次没有看到哪个应用没加密就发请求。' : '这次没有看到它没加密就发请求。');
+    const rows = list.map((a) => [
+      names[a.package] || a.label ? `${names[a.package] || a.label}（${a.package}）` : a.package,
+      a.requests, a.background, hosts(a.hosts || []), (a.kinds || []).join('、') || '—']);
+    const notes = [];
+    if (other.requests) {
+      notes.push(`另有 ${fmtNumber(other.requests)} 个没加密的请求不知道是哪个应用发的（可能是连接太短，没对上应用），`
+        + `${toward(hosts(other.hosts || []))}。`);
+    }
+    if (c.system) notes.push(`系统本身没加密发了 ${fmtNumber(c.system)} 个请求，没有算到应用上。`);
+    return el('section', { class: list.length ? 'cleartext found' : 'cleartext' }, head,
+      el('p', null, lead),
+      rows.length ? table(['应用', '没加密的请求', '你没打开它时', '发往', '带了哪些信息（按字段名）'], rows) : null,
+      notes.map((t) => el('p', { class: 'note' }, t)));
   }
 
   function explain(phone, mine, system) {
@@ -472,7 +511,8 @@
       withNumbers(text),
       b.background > 0 && !String(text).includes('后台')
         ? el('span', { class: 'bg' }, '后台 ', el('b', null, fmtNumber(b.background))) : null,
-      b.denied > 0 ? el('span', { class: 'bg' }, '被拒 ', el('b', null, fmtNumber(b.denied))) : null);
+      b.denied > 0 ? el('span', { class: 'bg' }, '被拒 ', el('b', null, fmtNumber(b.denied))) : null,
+      b.cleartext > 0 ? el('span', { class: 'bg' }, '没加密 ', el('b', null, fmtNumber(b.cleartext))) : null);
   }
 
   function appRow(app, index, runId, open) {
