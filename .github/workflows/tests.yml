@@ -56,6 +56,8 @@ jobs:
           Add-Type -AssemblyName System.Drawing
           [System.Drawing.Icon]::ExtractAssociatedIcon("$PWD\Stakeout.exe").ToBitmap().Save("$PWD\exe-icon.png")
           Write-Output ("py launcher on this machine: " + [bool](Get-Command py -ErrorAction SilentlyContinue))
+          # Python holds back output that goes to a file; the test kills it, so it must not.
+          $env:PYTHONUNBUFFERED = '1'
           $p = Start-Process -FilePath .\Stakeout.exe -ArgumentList '--no-open', '--port', '8799' -PassThru `
                -RedirectStandardOutput out.txt -RedirectStandardError err.txt
           $ok = $false
