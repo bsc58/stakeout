@@ -20,7 +20,7 @@ Stakeout 回答一个问题：**手机上的应用都在做什么？**
 ## 需要什么
 
 - 一台已 root 的安卓手机，开启 USB 调试并用数据线连接电脑。在手机的 root 管理器里要允许 Shell（com.android.shell）使用超级用户：电脑上运行 `adb shell su -c id`，输出里有 `uid=0` 就可以。用 KernelSU 测试过；Magisk、APatch 这类同样提供 `su` 的方案按原理可用，没有实测。
-- 一台 Mac 或 Windows 电脑，装有 Python 3.12 或更新的版本（测试在 3.12、3.14 和 3.14 的自由线程版上跑），不需要安装任何第三方包。Windows 上从 https://www.python.org 安装（不要用应用商店版）。双击启动时会自己找一个够新的 Python，见下面“先用网页”。Mac 版在真机上测过；Windows 版连着手机测过整部手机的观察（没有测解密），见下面“在 Windows 上”。
+- 一台 Mac 或 Windows 电脑，装有 Python 3.12 或更新的版本（测试在 3.12、3.14 和 3.14 的自由线程版上跑），不需要安装任何第三方包。Windows 上从 https://www.python.org 安装（不要用应用商店版）。双击启动时会自己找一个够新的 Python，见下面“先用网页”。Mac 版在真机上测过；Windows 版见下面“在 Windows 上”。
 - adb。查找顺序：环境变量 `AW_ADB`，项目旁边的 `../adb-tools/platform-tools/adb`（Windows 上是 `adb.exe`），`PATH`；都没有时再找常见的位置：Android SDK 的 `platform-tools`（环境变量 `ANDROID_HOME`、`ANDROID_SDK_ROOT`，然后是 Android Studio 默认的 SDK 文件夹），解压在项目旁边、用户文件夹、“下载”或桌面里的 `platform-tools` 文件夹，Windows 上还有系统盘根目录的 `C:\platform-tools`，Mac 上还有 Homebrew 装的 adb。
 - 看没加密的请求（见下面“没加密就发出去的请求”）和解密 HTTPS 内容时需要：
   - 电脑上的 Wireshark（用的是其中的 `tshark`，用 4.6.10 测试过）。没有它也能观察，只是看不到请求的内容。查找顺序：环境变量 `AW_TSHARK`；Mac 上是项目旁边的 `../wireshark-tools/Wireshark.app/Contents/MacOS/tshark`、`/Applications/Wireshark.app/Contents/MacOS/tshark`，Windows 上是项目旁边的 `../wireshark-tools/Wireshark/tshark.exe`、`C:\Program Files\Wireshark\tshark.exe`；最后是 `PATH` 里的 `tshark`。Stakeout 不安装它，请从 https://www.wireshark.org 下载。
