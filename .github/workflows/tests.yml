@@ -11,12 +11,18 @@ jobs:
       fail-fast: false
       matrix:
         os: [windows-latest, macos-latest]
+        # the oldest Python Stakeout runs on (MIN_PYTHON in stakeout.py) and the newest; on Windows also the
+        # newest's free-threaded build, which the Python launcher there may have as its default
+        python: ["3.12", "3.14"]
+        include:
+          - os: windows-latest
+            python: "3.14t"
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: ${{ matrix.python }}
       - name: Unit tests
         run: python -m unittest discover -s tests -v
       # Read as bytes: grep on Windows drops the CR before matching and cannot see line endings.

@@ -37,6 +37,12 @@ _ARGPARSE_ZH = {
 }
 
 
+# The oldest Python Stakeout runs on; the launchers (Stakeout.bat, Stakeout.exe, Stakeout.command) look for
+# one at least this new. This file itself must stay readable by older Pythons, so that they can say so.
+MIN_PYTHON = (3, 12)
+OLD_PYTHON_ZH = ("Stakeout 需要 Python {need} 或更新的版本，现在用的是 {have}（{exe}）。"
+                 "请从 https://www.python.org 安装新版本。")
+
 SHOW_SECRETS_HELP = "报告里显示 Cookie、令牌、设备标识等被隐藏的值的原值（默认只显示长度）"
 # run --decrypt (the key route, docs/CONTRACT_KEYLOG.md) while the app already had a process: what that
 # costs and what to do. Stakeout never stops or starts the app itself.
@@ -322,6 +328,9 @@ def cmd_ui(args):
 
 
 def main(argv=None):
+    if sys.version_info < MIN_PYTHON:
+        return _fail(OLD_PYTHON_ZH.format(need=".".join(map(str, MIN_PYTHON)),
+                                          have=".".join(map(str, sys.version_info[:3])), exe=sys.executable))
     argv = sys.argv[1:] if argv is None else argv
     translate = argparse._
     argparse._ = lambda text: _ARGPARSE_ZH.get(text) or translate(text)

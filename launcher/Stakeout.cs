@@ -47,10 +47,14 @@ static class Launcher
         foreach (string a in args)
             rest += " " + Quote(a);
 
-        // The Python launcher py first (python.org installs it), then python on PATH.
-        string[,] pythons = { { "py", "-3 " }, { "python", "" } };
+        // The first Python that is 3.12 or newer (MIN_PYTHON in stakeout.py): the Python launcher py with its
+        // default (python.org installs py), python on PATH, then py with each newer version by name, for when
+        // the default is an older one. Stakeout.bat looks in the same order.
+        string[,] pythons = { { "py", "-3 " }, { "python", "" }, { "py", "-3.14 " }, { "py", "-3.13 " }, { "py", "-3.12 " } };
         for (int i = 0; i < pythons.GetLength(0); i++)
         {
+            if (!NewEnough(pythons[i, 0], pythons[i, 1]))
+                continue;                           // not installed, or too old: try the next one
             ProcessStartInfo info = new ProcessStartInfo(pythons[i, 0], pythons[i, 1] + rest);
             info.UseShellExecute = false;           // Python shares this console window
             info.WorkingDirectory = dir;
@@ -62,14 +66,39 @@ static class Launcher
             }
             catch (Win32Exception)
             {
-                continue;                           // not installed: try the next one
+                continue;                           // gone since the check: try the next one
             }
             proc.WaitForExit();
             if (proc.ExitCode != 0)
                 Pause();                            // keep Stakeout's message readable
             return proc.ExitCode;
         }
-        return Fail("找不到 Python。请从 https://www.python.org 安装 Python 3.12，安装时勾上 “Add python.exe to PATH”。");
+        return Fail("找不到 Python 3.12 或更新的版本。请从 https://www.python.org 安装，安装时勾上 “Add python.exe to PATH”。");
+    }
+
+    // Whether this Python is there and at least 3.12. Quietly: the Microsoft Store's stand-in for python, there
+    // when no Python is installed, prints a message and fails.
+    static bool NewEnough(string exe, string flags)
+    {
+        ProcessStartInfo info = new ProcessStartInfo(exe, flags + "-c \"import sys; sys.exit(sys.version_info < (3, 12))\"");
+        info.UseShellExecute = false;
+        info.CreateNoWindow = true;
+        info.RedirectStandardOutput = true;
+        info.RedirectStandardError = true;
+        try
+        {
+            using (Process proc = Process.Start(info))
+            {
+                proc.StandardOutput.ReadToEnd();    // a few lines at most
+                proc.StandardError.ReadToEnd();
+                proc.WaitForExit();
+                return proc.ExitCode == 0;
+            }
+        }
+        catch (Win32Exception)
+        {
+            return false;                           // not installed
+        }
     }
 
     static int Fail(string message)

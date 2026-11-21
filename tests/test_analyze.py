@@ -1,3 +1,4 @@
+import ast
 import contextlib
 import copy
 import gettext
@@ -1705,6 +1706,17 @@ class Cli(unittest.TestCase):
         self.assertTrue(out.getvalue().startswith("用法：stakeout.py"), out.getvalue())
         self.assertIn("run ", out.getvalue())
         self.assertIs(stakeout.argparse._, gettext.gettext)
+
+    def test_too_old_python(self):
+        # an older Python says which one it is and which one is needed, before anything else
+        with mock.patch.object(sys, "version_info", (3, 11, 9, "final", 0)):
+            code, out, err = self.call("list")
+        self.assertEqual(code, 1)
+        self.assertIn("需要 Python 3.12 或更新的版本，现在用的是 3.11.9", err)
+        self.assertIn(sys.executable, err)
+        self.device.Device.assert_not_called()
+        # which it can only do while stakeout.py itself reads as an older Python's code
+        ast.parse(Path(stakeout.__file__).read_text(encoding="utf-8"), feature_version=(3, 8))
 
     def test_list(self):
         # user-installed packages only, sorted, filtered by the keyword (any case)

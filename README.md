@@ -20,8 +20,8 @@ Stakeout 回答一个问题：**手机上的应用都在做什么？**
 ## 需要什么
 
 - 一台已 root 的安卓手机，开启 USB 调试并用数据线连接电脑。在手机的 root 管理器里要允许 Shell（com.android.shell）使用超级用户：电脑上运行 `adb shell su -c id`，输出里有 `uid=0` 就可以。用 KernelSU 测试过；Magisk、APatch 这类同样提供 `su` 的方案按原理可用，没有实测。
-- 一台 Mac 或 Windows 电脑，装有 Python 3.12，不需要安装任何第三方包。Windows 上从 https://www.python.org 安装（不要用应用商店版）。Mac 版在真机上测过；Windows 版还没有连着手机测过，见下面“在 Windows 上”。
-- adb。查找顺序：环境变量 `AW_ADB`，项目旁边的 `../adb-tools/platform-tools/adb`（Windows 上是 `adb.exe`），`PATH`。
+- 一台 Mac 或 Windows 电脑，装有 Python 3.12 或更新的版本（测试在 3.12、3.14 和 3.14 的自由线程版上跑），不需要安装任何第三方包。Windows 上从 https://www.python.org 安装（不要用应用商店版）。双击启动时会自己找一个够新的 Python，见下面“先用网页”。Mac 版在真机上测过；Windows 版连着手机测过整部手机的观察（没有测解密），见下面“在 Windows 上”。
+- adb。查找顺序：环境变量 `AW_ADB`，项目旁边的 `../adb-tools/platform-tools/adb`（Windows 上是 `adb.exe`），`PATH`；都没有时再找常见的位置：Android SDK 的 `platform-tools`（环境变量 `ANDROID_HOME`、`ANDROID_SDK_ROOT`，然后是 Android Studio 默认的 SDK 文件夹），解压在项目旁边、用户文件夹、“下载”或桌面里的 `platform-tools` 文件夹，Windows 上还有系统盘根目录的 `C:\platform-tools`，Mac 上还有 Homebrew 装的 adb。
 - 看没加密的请求（见下面“没加密就发出去的请求”）和解密 HTTPS 内容时需要：
   - 电脑上的 Wireshark（用的是其中的 `tshark`，用 4.6.10 测试过）。没有它也能观察，只是看不到请求的内容。查找顺序：环境变量 `AW_TSHARK`；Mac 上是项目旁边的 `../wireshark-tools/Wireshark.app/Contents/MacOS/tshark`、`/Applications/Wireshark.app/Contents/MacOS/tshark`，Windows 上是项目旁边的 `../wireshark-tools/Wireshark/tshark.exe`、`C:\Program Files\Wireshark\tshark.exe`；最后是 `PATH` 里的 `tshark`。Stakeout 不安装它，请从 https://www.wireshark.org 下载。
   - 只有解密时才需要：手机用的 eCapture v2.11.0 android-arm64 程序，放在电脑上。查找顺序：环境变量 `AW_ECAPTURE`，项目旁边的 `../ecapture-tools/ecapture`。采集时 Stakeout 把它推到手机上运行，结束后删掉。
@@ -37,6 +37,8 @@ python3 stakeout.py ui
 图标存在文件的附加属性里，源图是 `icon.png`；用不保留附加属性的方式复制这个文件，图标会丢，文件本身照常能用。
 
 Windows 上双击 `Stakeout.exe`（也是像素侦探图标，在发布版的压缩包里）或 `Stakeout.bat`，做的是同一件事；命令行里把 `python3` 换成 `py`。
+
+双击启动时用的是找到的第一个 Python 3.12 或更新的版本：Mac 上依次试 `python3.14`、`python3.13`、`python3.12`、`python3`；Windows 上依次试 `py -3`、`python`、`py -3.14`、`py -3.13`、`py -3.12`。都不够新或都没有时，窗口里会说明。用更旧的 Python 在命令行里运行 `stakeout.py`，它也会说明需要哪个版本。
 
 终端里会给出一个网址（`http://127.0.0.1:8765/?token=…`）并打开浏览器。网页只有这台电脑能打开，网址里的 token 是这次启动时生成的；关掉浏览器不会停止，在终端按 Ctrl+C 退出（正在进行的观察会先正常结束并整理好结果）。`--port` 换端口，`--no-open` 不自动打开浏览器。
 
@@ -71,8 +73,8 @@ python3 stakeout.py ui [--port 8765] [--no-open]                   # 网页
 
 ## 在 Windows 上
 
-1. 装 Python 3.12（https://www.python.org ，安装时勾上 “Add python.exe to PATH”）。
-2. 下载 Android platform-tools 的 Windows 版，把解开的 `platform-tools` 文件夹放进项目旁边的 `adb-tools` 文件夹里（得到 `adb-tools\platform-tools\adb.exe`），或者加进 `PATH`。手机第一次连 Windows 电脑时，可能要装手机厂商的 USB 驱动，`adb devices` 才能看到手机。
+1. 装 Python 3.12 或更新的版本（https://www.python.org ，安装时勾上 “Add python.exe to PATH”）。
+2. 下载 Android platform-tools 的 Windows 版，把解开的 `platform-tools` 文件夹放进项目旁边的 `adb-tools` 文件夹里（得到 `adb-tools\platform-tools\adb.exe`），或者直接放在用户文件夹（`C:\Users\<用户名>\platform-tools`）、“下载”或桌面里，也可以加进 `PATH`。装了 Android Studio 的话，它自带的 adb 也能找到。手机第一次连 Windows 电脑时，可能要装手机厂商的 USB 驱动，`adb devices` 才能看到手机。
 3. 下载 Stakeout：在 Releases 里下载 Windows 版的压缩包再解开（也可以用 `git clone`）。推到手机上运行的脚本必须保持 Unix 的换行方式，仓库里已经设好，不要用会改换行的编辑器去改 `aw\phone\` 里的文件。
 4. 要解密的话，装 Wireshark 的 Windows 版（默认装到 `C:\Program Files\Wireshark`），eCapture 用的是和 Mac 上同一个手机程序，放到项目旁边的 `ecapture-tools\ecapture`。
 5. 双击 `Stakeout.exe`（压缩包里有，图标是像素侦探）。它没有数字签名，第一次打开时 Windows 会提示“Windows 已保护你的电脑”：点“更多信息”，再点“仍要运行”。它只是用 Python 启动 Stakeout，源代码在 `launcher\Stakeout.cs`。用 `git clone` 得到的代码里没有这个程序，双击 `Stakeout.bat`，效果一样。

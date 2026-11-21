@@ -67,9 +67,37 @@ def _check_lost(err):
         raise DeviceLost(f"与手机的连接断开了（adb：{re.sub(r'^(?:adb: )?(?:error: )?', '', line)}）")
 
 
+def common_adbs():
+    """Where adb usually is when it is not on PATH, in lookup order: the Android SDK's platform-tools
+    ($ANDROID_HOME, $ANDROID_SDK_ROOT, then Android Studio's default SDK folder), then a platform-tools folder
+    unpacked next to the project, in the home folder, its Downloads or Desktop, or (Windows) at the root of
+    the system drive; on macOS last Homebrew's bin folders."""
+    exe = "adb.exe" if WINDOWS else "adb"
+    try:
+        home = Path.home()
+    except RuntimeError:        # no home folder to be found
+        home = None
+    sdks = [Path(v) for v in (os.environ.get("ANDROID_HOME"), os.environ.get("ANDROID_SDK_ROOT")) if v]
+    if WINDOWS:
+        if os.environ.get("LOCALAPPDATA"):
+            sdks.append(Path(os.environ["LOCALAPPDATA"]) / "Android" / "Sdk")
+    elif sys.platform == "darwin" and home:
+        sdks.append(home / "Library" / "Android" / "sdk")
+    elif home:
+        sdks.append(home / "Android" / "Sdk")
+    dirs = [sdk / "platform-tools" for sdk in sdks] + [PROJECT_DIR.parent / "platform-tools"]
+    if home:
+        dirs += [home / "platform-tools", home / "Downloads" / "platform-tools", home / "Desktop" / "platform-tools"]
+    if WINDOWS:
+        dirs.append(Path(os.environ.get("SystemDrive", "C:") + "\\") / "platform-tools")
+    elif sys.platform == "darwin":
+        dirs += [Path("/opt/homebrew/bin"), Path("/usr/local/bin")]
+    return [d / exe for d in dirs]
+
+
 def find_adb(adb=None):
     """adb lookup order: argument, $AW_ADB, <project>/../adb-tools/platform-tools/adb (adb.exe on Windows),
-    PATH."""
+    PATH, then common_adbs()."""
     if adb:
         found = shutil.which(adb)
         if not found:
@@ -86,7 +114,11 @@ def find_adb(adb=None):
     found = shutil.which("adb")
     if found:
         return found
-    raise DeviceError("找不到 adb。请安装 Android platform-tools，或用环境变量 AW_ADB 指定 adb 的路径。")
+    for candidate in common_adbs():
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate)
+    raise DeviceError("找不到 adb。请安装 Android platform-tools（https://developer.android.com/tools/releases/platform-tools ，"
+                      "解压到用户文件夹、“下载”文件夹或项目旁边即可），或用环境变量 AW_ADB 指定 adb 的路径。")
 
 
 def find_ecapture(path=None) -> str | None:
